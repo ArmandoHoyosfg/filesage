@@ -1,0 +1,76 @@
+Metadata-Version: 2.4
+Name: filesage
+Version: 0.1.0
+Summary: Herramienta inteligente y modular para buscar, analizar, mover y eliminar archivos de forma segura (duplicados, espacio en disco, etc.)
+Author: FileSage Team
+License: MIT
+Keywords: files,duplicates,disk-usage,cleanup,file-manager
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: End Users/Desktop
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: System :: Filesystems
+Classifier: Topic :: Utilities
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic>=2.5
+Requires-Dist: pydantic-settings>=2.1
+Requires-Dist: typer[all]>=0.12
+Requires-Dist: rich>=13.7
+Requires-Dist: xxhash>=3.4
+Requires-Dist: send2trash>=1.8
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.1; extra == "dev"
+Requires-Dist: ruff>=0.3; extra == "dev"
+Requires-Dist: mypy>=1.8; extra == "dev"
+
+# FileSage
+
+Herramienta inteligente, modular y segura para:
+
+- Analizar el uso de espacio en disco / carpetas
+- Buscar y gestionar archivos duplicados
+- Buscar, mover y eliminar archivos de forma controlada
+- Generar reportes y mantener un historial reversible de acciones
+
+## Principios de diseño
+
+- **Arquitectura modular por capas** (Domain → Services → Infrastructure → Presentation)
+- **Interfaces claras (ABC)** para que añadir funciones no rompa el resto
+- **Seguridad por defecto**: dry-run, papelera, logs de transacciones y rollback
+- **Escalable**: pipeline de hashing por etapas (tamaño → parcial → completo)
+- **Extensible**: nuevas estrategias, filtros o UIs se agregan sin tocar el núcleo
+
+## Estado actual
+
+**Etapa 0 – Fundación** (completada)
+
+- Estructura de proyecto
+- Modelos de dominio e interfaces
+- Sistema de configuración y logging
+- CLI base
+
+## Instalación (desarrollo)
+
+```bash
+cd filesage
+python -m venv .venv
+source .venv/bin/activate   # Linux/macOS
+# .venv\Scripts\activate    # Windows
+pip install -e ".[dev]"
+```
+
+## Uso rápido
+
+```bash
+filesage --help
+filesage version
+```
+
+## Roadmap
+
+Ver el plan de etapas en la documentación del proyecto.

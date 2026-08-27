@@ -1,0 +1,43 @@
+# Configuración por defecto de FileSage
+# Se puede sobrescribir con variables de entorno o archivo de usuario
+
+app:
+  name: "FileSage"
+  version: "0.1.0"
+  dry_run_default: true
+
+scan:
+  follow_symlinks: false
+  ignore_hidden: true
+  max_depth: null          # null = sin límite
+  min_file_size_bytes: 0
+  exclude_patterns:
+    - "**/.git/**"
+    - "**/node_modules/**"
+    - "**/.venv/**"
+    - "**/__pycache__/**"
+    - "**/.DS_Store"
+    - "**/Thumbs.db"
+
+hashing:
+  algorithm: "xxhash64"    # xxhash64 | sha256 | blake3
+  partial_size_kb: 64      # tamaño del hash parcial
+  full_hash_threshold_mb: 0  # 0 = siempre calcular full hash si pasa el filtro
+
+duplicates:
+  min_size_bytes: 1024     # ignorar archivos más pequeños
+  keep_strategy: "newest"  # newest | oldest | largest | path_priority
+
+actions:
+  use_trash: true
+  transaction_log: true
+  confirm_destructive: true
+
+logging:
+  level: "INFO"
+  file: null               # null = solo consola
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+
+storage:
+  index_db: "~/.filesage/index.db"
+  transaction_db: "~/.filesage/transactions.db"
