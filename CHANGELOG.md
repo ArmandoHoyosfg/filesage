@@ -3,6 +3,12 @@
 Todos los cambios relevantes de FileSage se documentan aqui.
 Formato basado en [Keep a Changelog](https://keepachangelog.com/) y [Semantic Versioning](https://semver.org/).
 
+## [0.8.9] - 2026-08-29
+
+### Improved
+- Diagnostico de red: latencia TCP multi-destino y velocidad estimada leve (CDN)
+- Heuristicas por latencia alta / bajada muy lenta
+
 ## [0.8.8] - 2026-08-29
 
 ### Added

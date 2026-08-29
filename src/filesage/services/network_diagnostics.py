@@ -5,7 +5,9 @@ Capas:
 2. Resolucion DNS (stdlib + dnspython si esta)
 3. Alcance ICMP (icmplib o ping del SO)
 4. HTTP/HTTPS saliente
-5. Heuristica de causa mas probable + acciones sugeridas
+5. Latencia TCP multi-destino (leve)
+6. Estimacion de velocidad de bajada (archivo pequeno de CDN)
+7. Heuristica de causa mas probable + acciones sugeridas
 
 Las reparaciones destructivas (Winsock, etc.) exigen confirmacion explicita
 y privilegios de administrador; no se ejecutan solas.
@@ -32,6 +34,20 @@ TEST_HOSTS = ("cloudflare.com", "google.com", "microsoft.com")
 HTTP_URLS = (
     "https://www.cloudflare.com/cdn-cgi/trace",
     "http://connectivitycheck.gstatic.com/generate_204",
+)
+
+# Descargas pequenas y estables (CDN); ~100KB–1MB segun endpoint
+SPEED_SAMPLES = (
+    # Cloudflare: 100KB
+    ("https://speed.cloudflare.com/__down?bytes=100000", 100_000),
+    # Cloudflare: 500KB (solo si el primero va bien y se pide "full")
+    ("https://speed.cloudflare.com/__down?bytes=500000", 500_000),
+)
+
+LATENCY_TARGETS = (
+    ("1.1.1.1", 443),
+    ("8.8.8.8", 443),
+    ("cloudflare.com", 443),
 )
 
 
@@ -264,6 +280,137 @@ def check_http(url: str = HTTP_URLS[0]) -> CheckResult:
         return CheckResult("http", "Salida HTTP/HTTPS", False, str(e), "error")
 
 
+
+def check_tcp_latency(
+    targets: tuple[tuple[str, int], ...] = LATENCY_TARGETS,
+    samples: int = 3,
+) -> CheckResult:
+    """Latencia TCP (connect) multi-destino — no requiere ICMP privilegiado."""
+    per_host: dict[str, list[float]] = {}
+    for host, port in targets:
+        times: list[float] = []
+        for _ in range(samples):
+            try:
+                # resolver si es nombre
+                infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+                family, socktype, proto, _, sockaddr = infos[0]
+                t0 = time.perf_counter()
+                s = socket.socket(family, socktype, proto)
+                s.settimeout(2.5)
+                s.connect(sockaddr)
+                s.close()
+                times.append((time.perf_counter() - t0) * 1000)
+            except Exception:
+                times.append(float("nan"))
+            time.sleep(0.05)
+        per_host[f"{host}:{port}"] = times
+
+    valid = [ms for vals in per_host.values() for ms in vals if ms == ms]  # not nan
+    if not valid:
+        return CheckResult(
+            "latency",
+            "Latencia TCP",
+            False,
+            "No se pudo medir latencia TCP a ningun destino.",
+            "error",
+            {"hosts": per_host},
+        )
+
+    avg = sum(valid) / len(valid)
+    mn, mx = min(valid), max(valid)
+    jitter = mx - mn
+    # clasificar
+    if avg < 40:
+        quality = "excelente"
+        sev = "info"
+    elif avg < 80:
+        quality = "buena"
+        sev = "info"
+    elif avg < 150:
+        quality = "aceptable"
+        sev = "warn"
+    else:
+        quality = "alta (posible congestion o enlace lento)"
+        sev = "warn"
+
+    detail = f"promedio {avg:.0f} ms · min {mn:.0f} · max {mx:.0f} · jitter ~{jitter:.0f} ms ({quality})"
+    parts = []
+    for name, vals in per_host.items():
+        okv = [v for v in vals if v == v]
+        if okv:
+            parts.append(f"{name}={sum(okv)/len(okv):.0f}ms")
+        else:
+            parts.append(f"{name}=fail")
+    detail += " · " + ", ".join(parts)
+
+    return CheckResult(
+        "latency",
+        "Latencia TCP (leve)",
+        True,
+        detail,
+        sev,
+        {"avg_ms": avg, "min_ms": mn, "max_ms": mx, "jitter_ms": jitter, "hosts": per_host},
+    )
+
+
+def check_download_speed(*, light: bool = True) -> CheckResult:
+    """Estimacion de velocidad bajando 100KB (o 500KB) desde CDN.
+
+    No es un speedtest certificador; sirve para comparar y detectar enlaces muy lentos.
+    """
+    samples = SPEED_SAMPLES[:1] if light else SPEED_SAMPLES
+    rates: list[float] = []  # Mbps
+    details: list[str] = []
+
+    for url, expected in samples:
+        try:
+            t0 = time.perf_counter()
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "FileSage/0.8 NetworkDiag"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = resp.read()
+            elapsed = time.perf_counter() - t0
+            if elapsed <= 0:
+                continue
+            nbytes = len(data)
+            mbps = (nbytes * 8) / elapsed / 1_000_000
+            rates.append(mbps)
+            details.append(f"{nbytes/1000:.0f}KB en {elapsed:.2f}s → {mbps:.1f} Mbps")
+        except Exception as e:
+            details.append(f"fallo: {e}")
+
+    if not rates:
+        return CheckResult(
+            "speed",
+            "Velocidad (estimada)",
+            False,
+            "No se pudo descargar muestra de prueba. " + "; ".join(details),
+            "error",
+        )
+
+    avg = sum(rates) / len(rates)
+    if avg >= 50:
+        label, sev = "rapida", "info"
+    elif avg >= 15:
+        label, sev = "moderada", "info"
+    elif avg >= 5:
+        label, sev = "lenta", "warn"
+    else:
+        label, sev = "muy lenta", "warn"
+
+    return CheckResult(
+        "speed",
+        "Velocidad de bajada (estimada)",
+        True,
+        f"~{avg:.1f} Mbps ({label}) · " + " · ".join(details),
+        sev,
+        {"mbps": avg, "samples": rates, "light": light},
+    )
+
+
 def check_gateway() -> CheckResult:
     system = platform.system()
     if system == "Windows":
@@ -402,12 +549,48 @@ def analyze(checks: list[CheckResult]) -> Diagnosis:
             [],
         )
 
-    if all(c.ok for c in checks if c.id in ("interfaces", "dns", "http")):
+    latency = by_id.get("latency")
+    speed = by_id.get("speed")
+
+    if speed and speed.ok and speed.data.get("mbps", 0) < 3 and latency and latency.ok:
         return Diagnosis(
             checks,
-            "No se detectan fallos graves de conectividad basica.",
+            "Conectividad OK pero velocidad estimada muy baja (posible Wi‑Fi debil, congestion o plan limitado).",
+            "medium",
+            [
+                "Acercate al router o usa cable.",
+                "Cierra descargas/streaming en otros dispositivos.",
+                "La prueba es orientativa (~100KB); no sustituye un speedtest completo.",
+            ],
+            [],
+        )
+
+    if latency and latency.ok and latency.data.get("avg_ms", 0) > 150:
+        return Diagnosis(
+            checks,
+            "Latencia alta: la red responde pero con retraso (Wi‑Fi saturado, VPN o ruta larga).",
+            "medium",
+            [
+                "Prueba sin VPN.",
+                "Reinicia el router si el jitter es alto.",
+            ],
+            [],
+        )
+
+    if all(c.ok for c in checks if c.id in ("interfaces", "dns", "http")):
+        extra = ""
+        if speed and speed.ok:
+            extra = f" Velocidad estimada ~{speed.data.get('mbps', 0):.0f} Mbps."
+        if latency and latency.ok:
+            extra += f" Latencia media ~{latency.data.get('avg_ms', 0):.0f} ms."
+        return Diagnosis(
+            checks,
+            "No se detectan fallos graves de conectividad basica." + extra,
             "high",
-            ["La red parece operativa. Si una app falla, el problema puede ser de esa app o del servidor remoto."],
+            [
+                "La red parece operativa.",
+                "La prueba de velocidad es leve (muestra pequena); para medir el maximo real usa un speedtest dedicado.",
+            ],
             [],
         )
 
@@ -425,7 +608,7 @@ def analyze(checks: list[CheckResult]) -> Diagnosis:
     )
 
 
-def run_full_diagnostics(*, progress=None) -> Diagnosis:
+def run_full_diagnostics(*, progress=None, light_speed: bool = True) -> Diagnosis:
     steps = [
         ("Interfaces", check_interfaces),
         ("Gateway", check_gateway),
@@ -433,6 +616,8 @@ def run_full_diagnostics(*, progress=None) -> Diagnosis:
         ("DNS publicos", check_dns_servers),
         ("Ping", lambda: check_ping("1.1.1.1")),
         ("HTTP", check_http),
+        ("Latencia TCP", check_tcp_latency),
+        ("Velocidad leve", lambda: check_download_speed(light=light_speed)),
     ]
     checks: list[CheckResult] = []
     n = len(steps)

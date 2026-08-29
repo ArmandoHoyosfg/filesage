@@ -210,9 +210,14 @@ class Engine:
         from filesage.infrastructure.trash import empty_system_trash
         return empty_system_trash()
 
-    def run_network_diagnostics(self, *, progress: ProgressReporter | None = None):
+    def run_network_diagnostics(
+        self,
+        *,
+        progress: ProgressReporter | None = None,
+        light_speed: bool = True,
+    ):
         from filesage.services.network_diagnostics import run_full_diagnostics
-        return run_full_diagnostics(progress=progress)
+        return run_full_diagnostics(progress=progress, light_speed=light_speed)
 
     def run_network_repair(self, repair_id: str):
         from filesage.services.network_diagnostics import run_repair

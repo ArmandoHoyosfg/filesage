@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "filesage"
-version = "0.8.8"
+version = "0.8.9"
 description = "Herramienta inteligente y modular para buscar, analizar, mover y eliminar archivos de forma segura (duplicados, espacio en disco, etc.)"
 readme = "README.md"
 requires-python = ">=3.11"

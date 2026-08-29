@@ -1285,8 +1285,12 @@ def page_network() -> None:
     with page_frame("Diagnostico de red", active_path="/tools"):
         section_title(
             "Diagnostico inteligente de red",
-            "Comprueba IP, gateway, DNS, ping y HTTP. Propone la causa mas probable "
-            "y reparaciones seguras (flush DNS, DHCP). Winsock solo con confirmacion.",
+            "IP, gateway, DNS, ping, HTTP, latencia TCP y velocidad estimada (muestra pequena). "
+            "No sustituye un speedtest completo.",
+        )
+        deeper = ui.checkbox(
+            "Prueba de velocidad un poco mayor (~500KB, mas precisa)",
+            value=False,
         )
         btn = ui.button("Analizar red", icon="wifi_tethering").props("color=primary unelevated")
         bind_busy_button(btn)
@@ -1349,7 +1353,7 @@ def page_network() -> None:
             btn.set_enabled(False)
 
             def work(reporter):
-                return engine.run_network_diagnostics(progress=reporter)
+                return engine.run_network_diagnostics(progress=reporter, light_speed=not bool(deeper.value))
 
             try:
                 diag = await job.run(work, start_msg="Diagnosticando red…")

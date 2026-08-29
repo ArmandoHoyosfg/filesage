@@ -3,7 +3,7 @@
 
 app:
   name: "FileSage"
-  version: "0.8.8"
+  version: "0.8.9"
   dry_run_default: true
 
 scan:
