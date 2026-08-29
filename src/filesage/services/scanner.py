@@ -6,7 +6,9 @@ import logging
 import time
 from pathlib import Path
 
+from filesage.application.progress import ProgressReporter
 from filesage.core.config import Settings
+from filesage.core.workspace_safety import effective_exclude_patterns
 from filesage.domain.exceptions import ScanError
 from filesage.domain.interfaces import IScanner
 from filesage.domain.models import FileInfo, ScanResult
@@ -21,10 +23,17 @@ class Scanner(IScanner):
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    def scan(self, root: Path) -> ScanResult:
+    def scan(
+        self,
+        root: Path,
+        *,
+        progress: ProgressReporter | None = None,
+    ) -> ScanResult:
         """Recorre el directorio raiz y devuelve un ScanResult completo."""
         root = Path(root).expanduser().resolve()
         logger.info("Iniciando escaneo de: %s", root)
+        if progress:
+            progress.report(f"Iniciando escaneo de {root}", 0.0)
 
         start = time.perf_counter()
         files: list[FileInfo] = []
@@ -40,21 +49,29 @@ class Scanner(IScanner):
                 ignore_hidden=scan_cfg.ignore_hidden,
                 max_depth=scan_cfg.max_depth,
                 min_size=scan_cfg.min_file_size_bytes,
-                exclude_patterns=scan_cfg.exclude_patterns,
+                exclude_patterns=effective_exclude_patterns(
+                    scan_cfg.exclude_patterns,
+                    use_recommended=getattr(scan_cfg, 'use_recommended_excludes', True),
+                ),
             )
-            # Consumir el generador de forma limpia
+            n = 0
             while True:
                 try:
                     fi = next(gen)
                     files.append(fi)
                     total_size += fi.size
+                    n += 1
+                    if progress and n % 50 == 0:
+                        progress.report(f"Escaneados {n} archivos…", None)
                 except StopIteration as stop:
                     errors = list(stop.value or [])
                     break
         except ScanError:
-            # Re-lanzar errores de dominio (ruta inexistente, etc.)
             raise
         except Exception as exc:
+            from filesage.domain.exceptions import CancelledError
+            if isinstance(exc, CancelledError):
+                raise
             logger.exception("Error inesperado durante el escaneo")
             errors.append(str(exc))
 
@@ -67,6 +84,13 @@ class Scanner(IScanner):
             errors=tuple(errors),
             duration_seconds=duration,
         )
+
+        if progress:
+            progress.report(
+                f"Escaneo listo: {result.total_files} archivos "
+                f"({result.total_size / (1024 * 1024):.1f} MB)",
+                1.0,
+            )
 
         logger.info(
             "Escaneo terminado: %d archivos, %.2f MB, %.2f s, %d errores",

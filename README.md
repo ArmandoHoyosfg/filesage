@@ -4,6 +4,17 @@ Herramienta inteligente, modular y segura para analizar espacio en disco, encont
 
 Pensada tanto para **principiantes** (flujos guiados, dry-run, papelera) como para **usuarios avanzados** (CLI, exportes, hashing paralelo, transacciones).
 
+## Inicio rapido (launcher, recomendado)
+
+```bash
+cd filesage
+python scripts/run_filesage.py --install   # deps si faltan
+python scripts/run_filesage.py             # GUI Qt
+python scripts/run_filesage.py --web       # UI web
+```
+
+No hace falta empaquetar para usar la app en desarrollo.
+
 ## Inicio rapido (principiante)
 
 ```bash
@@ -47,4 +58,23 @@ Python 3.11+ (ver pyproject.toml)
 
 ## Licencia
 
-MIT
+GPL-3.0-or-later
+
+
+## Arquitectura
+
+El nucleo (`domain`, `services`, `infrastructure`, `core.Engine`) es independiente de la UI.
+Las interfaces (Qt, CLI, futura web) son adaptadores que solo usan la Application API.
+
+Ver `docs/ARCHITECTURE.md`.
+
+
+## Interfaz web (Etapa D)
+
+```bash
+pip install 'filesage[web]'
+filesage web
+# o: python -m filesage.presentation.web
+```
+
+Abre http://127.0.0.1:8080 — usa el mismo motor que la GUI Qt.

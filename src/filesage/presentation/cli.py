@@ -319,3 +319,14 @@ def export(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command("web")
+def web(
+    host: str = typer.Option("127.0.0.1", help="Host del servidor web"),
+    port: int = typer.Option(0, help="Puerto (0=automatico)"),
+    native: bool = typer.Option(True, help="Ventana nativa (default). Usa --no-native para navegador"),
+) -> None:
+    """Lanza el adaptador web (NiceGUI) sobre el mismo Engine."""
+    from filesage.presentation.web import run_web
+    run_web(host=host, port=port, native=native, reload=False)

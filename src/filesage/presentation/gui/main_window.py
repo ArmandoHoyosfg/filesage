@@ -5,6 +5,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QStatusBar,
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -22,6 +24,7 @@ from filesage.presentation.gui.pages.duplicates_page import DuplicatesPage
 from filesage.presentation.gui.pages.history_page import HistoryPage
 from filesage.presentation.gui.pages.settings_page import SettingsPage
 from filesage.presentation.gui.pages.help_page import HelpPage
+from filesage.presentation.gui.pages.search_page import SearchPage
 from filesage.presentation.gui.components.onboarding import OnboardingDialog
 from filesage.presentation.gui.components.wizard import CleanupWizard
 from filesage.presentation.gui.components.smart_plan_dialog import SmartPlanDialog
@@ -29,7 +32,11 @@ from filesage.presentation.gui.user_mode import UserMode, load_user_mode, save_u
 from filesage.presentation.gui.pages.space_page import SpacePage
 from filesage.presentation.gui.themes import DARK_QSS
 from filesage.presentation.gui.icons import icon, try_set_button_icon
-from filesage.presentation.gui.animations import fade_in
+from filesage.presentation.gui.animations import (
+    animate_stacked_slide,
+    animate_indicator_y,
+    clear_graphics_effects,
+)
 
 
 class SidebarButton(QPushButton):
@@ -67,10 +74,17 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.stack, stretch=1)
 
         self.pages: dict[str, QWidget] = {}
-        self._nav_buttons: dict[str, SidebarButton] = {}
+        # self._nav_buttons se rellena en _build_sidebar()
 
         self._build_pages()
         self._setup_shortcuts()
+
+        self._status = QStatusBar()
+        self.setStatusBar(self._status)
+        self._status.showMessage(
+            f"{self.settings.app.name} v{self.settings.app.version} · Listo · Modo seguro (dry-run por defecto)", 0
+        )
+
 
     def _build_sidebar(self) -> QFrame:
         frame = QFrame()
@@ -78,6 +92,13 @@ class MainWindow(QMainWindow):
         frame.setMinimumWidth(180)
         frame.setMaximumWidth(240)
         frame.setFixedWidth(200)
+
+        # Indicador de seccion activa (barra lateral animada)
+        self._nav_indicator = QFrame(frame)
+        self._nav_indicator.setObjectName("navIndicator")
+        self._nav_indicator.setFixedSize(3, 28)
+        self._nav_indicator.move(6, 80)
+        self._nav_indicator.raise_()
 
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(12, 20, 12, 20)
@@ -95,17 +116,22 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(24)
 
-        self.btn_dashboard = SidebarButton("  ⌂  Dashboard")
-        self.btn_space = SidebarButton("  ▤  Espacio")
-        self.btn_duplicates = SidebarButton("  ⧉  Duplicados")
-        self.btn_history = SidebarButton("  🕘  Historial")
-        self.btn_settings = SidebarButton("  ⚙  Configuracion")
-        self.btn_help = SidebarButton("  ?  Ayuda")
+        self.btn_dashboard = SidebarButton("  Dashboard")
+        self.btn_space = SidebarButton("  Espacio")
+        self.btn_duplicates = SidebarButton("  Duplicados")
+        self.btn_history = SidebarButton("  Historial")
+        self.btn_settings = SidebarButton("  Configuracion")
+        self.btn_help = SidebarButton("  Ayuda")
+        self.btn_search = SidebarButton("  Buscar")
+
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
 
         for btn in (
             self.btn_dashboard,
             self.btn_space,
             self.btn_duplicates,
+            self.btn_search,
             self.btn_history,
             self.btn_settings,
             self.btn_help,
@@ -114,7 +140,19 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-        self.btn_mode = SidebarButton("  ◉  Modo: Simple")
+        for b in (
+            self.btn_dashboard,
+            self.btn_space,
+            self.btn_duplicates,
+            self.btn_search,
+            self.btn_history,
+            self.btn_settings,
+            self.btn_help,
+        ):
+            self._nav_group.addButton(b)
+
+        self.btn_mode = SidebarButton("  Modo: Simple")
+
         self.btn_mode.setCheckable(False)
         self.btn_mode.setToolTip("Alternar entre modo Simple (guiado) y Experto (todas las opciones)")
         self.btn_mode.clicked.connect(self._toggle_mode)
@@ -131,6 +169,7 @@ class MainWindow(QMainWindow):
         self.btn_history.clicked.connect(lambda: self._navigate("history"))
         self.btn_settings.clicked.connect(lambda: self._navigate("settings"))
         self.btn_help.clicked.connect(lambda: self._navigate("help"))
+        self.btn_search.clicked.connect(lambda: self._navigate("search"))
 
         
         try_set_button_icon(self.btn_dashboard, "dashboard")
@@ -139,6 +178,7 @@ class MainWindow(QMainWindow):
         try_set_button_icon(self.btn_history, "history")
         try_set_button_icon(self.btn_settings, "settings")
         try_set_button_icon(self.btn_help, "help")
+        try_set_button_icon(self.btn_search, "scan")
         try_set_button_icon(self.btn_mode, "mode")
         self.btn_dashboard.setToolTip("Resumen y accesos rapidos")
         self.btn_space.setToolTip("Ver que ocupa mas espacio")
@@ -154,6 +194,7 @@ class MainWindow(QMainWindow):
             "history": self.btn_history,
             "settings": self.btn_settings,
             "help": self.btn_help,
+            "search": self.btn_search,
         }
         return frame
 
@@ -183,6 +224,11 @@ class MainWindow(QMainWindow):
         self.pages["settings"] = settings_page
         self.stack.addWidget(settings_page)
 
+        # Search
+        search_page = SearchPage(self.engine)
+        self.pages["search"] = search_page
+        self.stack.addWidget(search_page)
+
         # Help
         help_page = HelpPage()
         self.pages["help"] = help_page
@@ -205,13 +251,41 @@ class MainWindow(QMainWindow):
     def _navigate(self, key: str) -> None:
         if key not in self.pages:
             return
-        self.stack.setCurrentWidget(self.pages[key])
-        try:
-            fade_in(self.pages[key], duration=220)
-        except Exception:
-            pass
+        order = ["dashboard", "space", "duplicates", "search", "history", "settings", "help"]
+        old_key = None
         for k, btn in self._nav_buttons.items():
-            btn.setChecked(k == key)
+            if btn.isChecked():
+                old_key = k
+                break
+        direction = 1
+        if old_key in order and key in order:
+            direction = 1 if order.index(key) >= order.index(old_key) else -1
+
+        target = self._nav_buttons.get(key)
+        for k, btn in self._nav_buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+        if target is not None:
+            target.blockSignals(True)
+            target.setChecked(True)
+            target.blockSignals(False)
+            # Mover indicador a la altura del boton
+            try:
+                ind = getattr(self, "_nav_indicator", None)
+                if ind is not None:
+                    # Centrar verticalmente respecto al boton
+                    gy = target.mapTo(self.sidebar, target.rect().center()).y()
+                    animate_indicator_y(ind, max(0, gy - ind.height() // 2))
+            except Exception:
+                pass
+
+        page = self.pages[key]
+        clear_graphics_effects(page)
+        try:
+            animate_stacked_slide(self.stack, page, direction=direction)
+        except Exception:
+            self.stack.setCurrentWidget(page)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -269,6 +343,11 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+W"), self, self._start_wizard)
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, self._start_smart_plan)
         QShortcut(QKeySequence("F1"), self, lambda: self._navigate("help"))
+
+    def set_status(self, message: str, timeout_ms: int = 0) -> None:
+        """Mensaje en la barra de estado (cualquier pagina puede usarlo)."""
+        if hasattr(self, "_status"):
+            self._status.showMessage(message, timeout_ms)
 
     def _start_smart_plan(self) -> None:
         dlg = SmartPlanDialog(self.engine, self)

@@ -18,6 +18,7 @@ from filesage.core.config import Settings
 from filesage.domain.interfaces import IDuplicateFinder, IHasher
 from filesage.domain.models import DuplicateGroup, FileInfo
 from filesage.infrastructure.hasher import Hasher
+from filesage.application.progress import ProgressReporter
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +30,18 @@ class DuplicateFinder(IDuplicateFinder):
         self._settings = settings
         self._hasher = hasher or Hasher(settings)
 
-    def find(self, files: Sequence[FileInfo]) -> list[DuplicateGroup]:
+    def find(
+        self,
+        files: Sequence[FileInfo],
+        *,
+        progress: ProgressReporter | None = None,
+    ) -> list[DuplicateGroup]:
         """Devuelve lista de DuplicateGroup (solo grupos con 2+ archivos)."""
-        # Filtrar por tamano minimo
         min_size = self._settings.duplicates.min_size_bytes
         candidates = [f for f in files if f.size >= min_size and not f.is_symlink]
         logger.info("Buscando duplicados en %d archivos (min_size=%d)", len(candidates), min_size)
+        if progress:
+            progress.report(f"Candidatos a duplicados: {len(candidates)}", 0.05)
 
         if len(candidates) < 2:
             return []
@@ -46,6 +53,9 @@ class DuplicateFinder(IDuplicateFinder):
 
         size_groups = {s: lst for s, lst in by_size.items() if len(lst) > 1}
         logger.info("Grupos por tamano: %d (candidatos tras filtro: %d)", len(size_groups), sum(len(v) for v in size_groups.values()))
+        if progress:
+            progress.report(f"Grupos por tamaño: {len(size_groups)}", 0.15)
+            progress.check()
 
         # --- Etapa 2: hash parcial ---
         partial_map: dict[str, list[FileInfo]] = defaultdict(list)
@@ -61,6 +71,9 @@ class DuplicateFinder(IDuplicateFinder):
 
         partial_groups = {k: lst for k, lst in partial_map.items() if len(lst) > 1}
         logger.info("Grupos tras hash parcial: %d", len(partial_groups))
+        if progress:
+            progress.report(f"Tras hash parcial: {len(partial_groups)} grupos", 0.45)
+            progress.check()
 
         # --- Etapa 3: hash completo (paralelo) ---
         full_map: dict[str, list[FileInfo]] = defaultdict(list)
@@ -78,8 +91,18 @@ class DuplicateFinder(IDuplicateFinder):
         max_workers = min(8, max(1, len(to_hash)))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_hash_one, fi) for fi in to_hash]
+            done = 0
+            total = max(1, len(futures))
             for fut in as_completed(futures):
+                if progress:
+                    progress.check()
                 fi, fh = fut.result()
+                done += 1
+                if progress and (done % 5 == 0 or done == total):
+                    progress.report(
+                        f"Hash completo {done}/{total}",
+                        0.45 + 0.50 * (done / total),
+                    )
                 if fh is not None:
                     full_map[fh].append(fi.with_hashes(partial=fi.hash_partial, full=fh))
 
@@ -101,6 +124,8 @@ class DuplicateFinder(IDuplicateFinder):
 
         # Ordenar por espacio desperdiciado (mayor primero)
         results.sort(key=lambda g: g.wasted_size, reverse=True)
+        if progress:
+            progress.report(f"Duplicados: {len(results)} grupos", 1.0)
         logger.info("Duplicados encontrados: %d grupos, espacio desperdiciado total ~%.2f MB",
                     len(results),
                     sum(g.wasted_size for g in results) / (1024 * 1024))

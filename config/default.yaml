@@ -3,12 +3,13 @@
 
 app:
   name: "FileSage"
-  version: "0.1.0"
+  version: "0.8.8"
   dry_run_default: true
 
 scan:
   follow_symlinks: false
   ignore_hidden: true
+  use_recommended_excludes: true
   max_depth: null          # null = sin límite
   min_file_size_bytes: 0
   exclude_patterns:
@@ -35,7 +36,7 @@ actions:
 
 logging:
   level: "INFO"
-  file: null               # null = solo consola
+  file: "~/.filesage/filesage.log"
   format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 
 storage:

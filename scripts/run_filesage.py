@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 """Lanzador robusto de FileSage (sin empaquetar).
 
-Revisa el entorno antes de abrir la GUI:
-- Version de Python
-- Estructura del proyecto
-- Dependencias criticas
-- Configura PYTHONPATH
-- Arranca la aplicacion
+Revisa el entorno y arranca GUI Qt o Web.
 
-Uso (desde cualquier directorio):
-  python scripts/run_filesage.py
-  python3 scripts/run_filesage.py
-  ./scripts/run_filesage.py
+  python scripts/run_filesage.py           # GUI Qt (por defecto)
+  python scripts/run_filesage.py --web     # Adaptador web NiceGUI
+  python scripts/run_filesage.py --check   # Solo verificacion
+  python scripts/run_filesage.py --install # Intenta instalar deps
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import os
 import subprocess
@@ -24,7 +20,7 @@ from pathlib import Path
 
 MIN_PY = (3, 11)
 
-REQUIRED = [
+REQUIRED_CORE = [
     ("pydantic", "pydantic"),
     ("pydantic_settings", "pydantic-settings"),
     ("typer", "typer"),
@@ -32,12 +28,19 @@ REQUIRED = [
     ("xxhash", "xxhash"),
     ("send2trash", "send2trash"),
     ("yaml", "pyyaml"),
+]
+
+REQUIRED_GUI = [
     ("PySide6", "PySide6"),
     ("PIL", "Pillow"),
     ("pypdf", "pypdf"),
     ("tinytag", "tinytag"),
     ("puremagic", "puremagic"),
     ("qtawesome", "qtawesome"),
+]
+
+REQUIRED_WEB = [
+    ("nicegui", "nicegui"),
 ]
 
 
@@ -79,94 +82,100 @@ def module_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
-def check_dependencies(auto_install: bool) -> None:
-    missing = []
-    for mod, pkg in REQUIRED:
-        if not module_available(mod):
-            missing.append(pkg)
+def missing_packages(pairs: list[tuple[str, str]]) -> list[str]:
+    return [pip_name for mod, pip_name in pairs if not module_available(mod)]
 
-    if not missing:
-        info("Dependencias criticas OK")
+
+def install_packages(pkgs: list[str]) -> None:
+    if not pkgs:
         return
-
-    info(f"Faltan dependencias: {', '.join(missing)}")
-    if not auto_install:
-        fail(
-            "Instala con:\n"
-            f"  {sys.executable} -m pip install {' '.join(missing)}\n"
-            "O vuelve a lanzar con: python scripts/run_filesage.py --install"
-        )
-
-    info("Instalando dependencias...")
-    cmd = [sys.executable, "-m", "pip", "install", *missing]
-    # En algunos entornos hace falta --break-system-packages
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            cmd2 = cmd + ["--break-system-packages"]
-            r = subprocess.run(cmd2, capture_output=True, text=True)
-        if r.returncode != 0:
-            fail(f"No se pudieron instalar dependencias:\n{r.stderr or r.stdout}")
-    except Exception as e:
-        fail(str(e))
-
-    for mod, pkg in REQUIRED:
-        if not module_available(mod):
-            fail(f"Tras instalar, sigue faltando el modulo: {mod} (paquete {pkg})")
-    info("Dependencias instaladas OK")
+    info(f"Instalando: {', '.join(pkgs)}")
+    cmd = [sys.executable, "-m", "pip", "install", *pkgs]
+    r = subprocess.run(cmd)
+    if r.returncode != 0:
+        fail("Fallo al instalar dependencias. Revisa el log de pip.")
 
 
-def setup_path(root: Path) -> None:
+def ensure_path(root: Path) -> None:
     src = str(root / "src")
     if src not in sys.path:
         sys.path.insert(0, src)
     os.environ["PYTHONPATH"] = src + os.pathsep + os.environ.get("PYTHONPATH", "")
 
 
-def launch_gui() -> int:
-    info("Iniciando GUI...")
-    from filesage.presentation.gui.app import run_gui
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Lanzador FileSage (sin empaquetar)")
+    p.add_argument("--gui", action="store_true", help="Abrir GUI Qt (default)")
+    p.add_argument("--web", action="store_true", help="Abrir UI web en ventana nativa")
+    p.add_argument("--browser", action="store_true", help="Forzar navegador en vez de ventana nativa")
+    p.add_argument("--check", action="store_true", help="Solo verificar entorno")
+    p.add_argument(
+        "--install",
+        action="store_true",
+        help="Instalar dependencias faltantes con pip",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="Puerto web (0 = automatico, elige uno libre)",
+    )
+    return p.parse_args()
 
-    return int(run_gui() or 0)
 
-
-def main(argv: list[str] | None = None) -> int:
-    argv = list(argv if argv is not None else sys.argv[1:])
-    auto_install = "--install" in argv or "-i" in argv
-    if "--help" in argv or "-h" in argv:
-        print(__doc__)
-        print("Opciones:")
-        print("  --install, -i   Instala dependencias faltantes con pip")
-        print("  --cli           Delega a la CLI en lugar de la GUI")
-        print("  --check         Solo verifica entorno y sale")
-        return 0
-
+def main() -> None:
+    args = parse_args()
     root = project_root()
-    info("Comprobando entorno...")
     check_python()
     check_structure(root)
-    check_dependencies(auto_install=auto_install)
-    setup_path(root)
+    ensure_path(root)
 
-    if "--check" in argv:
-        info("Entorno listo. Nada que ejecutar (--check).")
-        return 0
+    mode = "web" if args.web else "gui"
+    needed = list(REQUIRED_CORE)
+    if mode == "gui":
+        needed += REQUIRED_GUI
+    else:
+        needed += REQUIRED_WEB
 
-    if "--cli" in argv:
-        # Quitar flags propios y pasar el resto a typer
-        rest = [a for a in argv if a not in ("--install", "-i", "--cli", "--check")]
-        from filesage.presentation.cli import app
+    missing = missing_packages(needed)
+    if missing:
+        if args.install:
+            install_packages(missing)
+            missing = missing_packages(needed)
+        if missing:
+            fail(
+                "Faltan dependencias: "
+                + ", ".join(missing)
+                + "\n  Prueba: python scripts/run_filesage.py --install"
+                + (" --web" if mode == "web" else "")
+            )
+    info(f"Dependencias OK ({mode})")
 
-        sys.argv = ["filesage", *rest]
-        app()
-        return 0
+    if args.check:
+        info("Verificacion completa. Nada que lanzar (--check).")
+        return
 
-    try:
-        return launch_gui()
-    except Exception as e:
-        fail(f"Fallo al iniciar la GUI: {e}")
-        return 1
+    if mode == "web":
+        native = not args.browser
+        info(
+            "Iniciando UI "
+            + ("nativa (ventana app)" if native else "en navegador")
+            + (f" · puerto {args.port}" if args.port else " · puerto automatico")
+        )
+        from filesage.presentation.web import run_web
+
+        run_web(
+            host="127.0.0.1",
+            port=args.port,  # 0 = auto libre
+            native=native,
+            reload=False,
+        )
+    else:
+        info("Iniciando GUI Qt…")
+        from filesage.presentation.gui.app import run_gui
+
+        raise SystemExit(run_gui())
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

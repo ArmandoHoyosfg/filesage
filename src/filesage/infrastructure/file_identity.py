@@ -223,6 +223,14 @@ def _pdf_details(path: Path) -> list[str]:
 
 def identify(path: Path | str, *, deep: bool = True) -> FileIdentity:
     path = Path(path)
+    if not path.exists():
+        return FileIdentity(
+            path=path,
+            mime="application/octet-stream",
+            label="No encontrado",
+            family="missing",
+            details=[],
+        )
     mime = _guess_mime(path)
     family = _family(mime)
     label = _base_label(path, mime)

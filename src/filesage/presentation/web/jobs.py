@@ -1,0 +1,122 @@
+"""Jobs async con progreso, cancelacion y registro global de sesion."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from typing import Any
+
+from nicegui import ui
+
+from filesage.application.progress import CancellationToken, ProgressReporter
+from filesage.domain.exceptions import CancelledError
+from filesage.presentation.web import session_store
+
+
+class JobControls:
+    """Barra de progreso + cancelar; publica estado en session_store."""
+
+    def __init__(self, *, page_route: str = "") -> None:
+        self.page_route = page_route
+        self.token: CancellationToken | None = None
+        self._running = False
+        with ui.column().classes("w-full gap-2") as self.root:
+            self.status = ui.label("").classes("text-sm text-[#9898b0]")
+            self.bar = ui.linear_progress(value=0, show_value=False).props(
+                "color=primary rounded"
+            )
+            self.bar.set_visibility(False)
+            self.pct = ui.label("").classes("text-xs text-[#6b6b80]")
+            self.pct.set_visibility(False)
+            self.cancel_btn = ui.button(
+                "Cancelar", icon="close", on_click=self.cancel
+            ).props("outline dense color=negative")
+            self.cancel_btn.set_visibility(False)
+
+        self._msg = ""
+        self._frac: float | None = None
+        self._timer = ui.timer(0.12, self._flush, active=False)
+
+    def _flush(self) -> None:
+        if self._msg:
+            self.status.set_text(self._msg)
+        if self._frac is None:
+            self.bar.props("indeterminate")
+        else:
+            self.bar.props(remove="indeterminate")
+            self.bar.set_value(max(0.0, min(1.0, self._frac)))
+            self.pct.set_text(f"{int(self._frac * 100)}%")
+
+    def start(self, message: str = "Trabajando…") -> ProgressReporter:
+        self.token = CancellationToken()
+        self._running = True
+        self._msg = message
+        self._frac = None
+        self.bar.set_visibility(True)
+        self.pct.set_visibility(True)
+        self.cancel_btn.set_visibility(True)
+        self.cancel_btn.set_enabled(True)
+        self.bar.props("indeterminate")
+        self.bar.set_value(0)
+        self.status.set_text(message)
+        self._timer.activate()
+        session_store.job_start(self.page_route, message)
+
+        def _cb(msg: str, frac: float | None) -> None:
+            self._msg = msg
+            self._frac = frac
+            session_store.job_progress(msg, frac)
+
+        return ProgressReporter(callback=_cb, cancel=self.token)
+
+    def finish(self, message: str = "", *, notify: bool = True) -> None:
+        self._running = False
+        self._timer.deactivate()
+        self.bar.set_visibility(False)
+        self.pct.set_visibility(False)
+        self.cancel_btn.set_visibility(False)
+        if message:
+            self.status.set_text(message)
+        session_store.job_finish(message or "Operacion terminada")
+        if notify and message:
+            ui.notify(message, type="positive", position="top")
+
+    def cancel(self) -> None:
+        if self.token is not None:
+            self.token.cancel()
+            self._msg = "Cancelando…"
+            self.cancel_btn.set_enabled(False)
+            session_store.job_progress("Cancelando…", self._frac)
+
+    async def run(
+        self,
+        fn: Callable[[ProgressReporter], Any],
+        *,
+        start_msg: str = "Trabajando…",
+        success_notice: str | None = None,
+    ) -> Any:
+        if session_store.job_is_running() and not self._running:
+            ui.notify(
+                "Ya hay una operacion en curso. Espera o cancela antes de iniciar otra.",
+                type="warning",
+            )
+            return None
+        reporter = self.start(start_msg)
+        try:
+            result = await asyncio.to_thread(fn, reporter)
+            notice = success_notice if success_notice is not None else "Operacion completada"
+            # notify=False aqui: la pagina puede notificar con detalle; el aviso global
+            # queda en finished_notice para otras secciones
+            self.finish(notice, notify=bool(success_notice))
+            if success_notice is None:
+                # toast generico solo si la pagina no manda uno propio
+                ui.notify(notice, type="positive", position="top")
+            return result
+        except CancelledError:
+            self.finish("Operacion cancelada", notify=False)
+            ui.notify("Cancelado", type="warning", position="top")
+            return None
+        except Exception as e:
+            self.finish(f"Error: {e}", notify=False)
+            ui.notify(str(e), type="negative", position="top")
+            raise

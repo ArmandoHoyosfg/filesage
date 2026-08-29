@@ -1,19 +1,16 @@
-"""Iconos vectoriales escalables via QtAwesome (Font Awesome / Material).
-
-Fallback a texto si qtawesome no esta disponible.
-"""
+"""Iconos vectoriales via QtAwesome, con cache y fallback seguro."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtGui import QColor, QIcon
+from PySide6.QtGui import QIcon
 
 _COLOR = "#cdd6f4"
 _COLOR_ACCENT = "#89b4fa"
 _COLOR_DARK = "#1e1e2e"
+_CACHE: dict[str, QIcon] = {}
 
-# nombre logico -> (prefix.name, color opcional)
 ICON_MAP: dict[str, str] = {
     "dashboard": "fa5s.home",
     "space": "fa5s.hdd",
@@ -39,25 +36,31 @@ ICON_MAP: dict[str, str] = {
 
 
 def icon(name: str, *, color: str | None = None, scale: float = 1.0) -> QIcon:
-    """Devuelve un QIcon escalable. Si falla, QIcon vacio."""
     key = ICON_MAP.get(name, name)
+    c = color or _COLOR
+    cache_key = f"{key}|{c}|{scale}"
+    if cache_key in _CACHE:
+        return _CACHE[cache_key]
     try:
         import qtawesome as qta
-
-        c = color or _COLOR
-        return qta.icon(key, color=c, scale_factor=scale)
+        from PySide6.QtWidgets import QApplication
+        if QApplication.instance() is None:
+            return QIcon()
+        ic = qta.icon(key, color=c, scale_factor=scale)
+        _CACHE[cache_key] = ic
+        return ic
     except Exception:
         return QIcon()
 
 
 def icon_for_button(name: str, *, on_accent: bool = False) -> QIcon:
-    """Icono pensado para botones (contraste)."""
     return icon(name, color=_COLOR_DARK if on_accent else _COLOR_ACCENT)
 
 
 def try_set_button_icon(button: Any, name: str, *, on_accent: bool = False) -> None:
-    """Asigna icono a un QPushButton si es posible."""
     try:
-        button.setIcon(icon_for_button(name, on_accent=on_accent))
+        ic = icon_for_button(name, on_accent=on_accent)
+        if not ic.isNull():
+            button.setIcon(ic)
     except Exception:
         pass

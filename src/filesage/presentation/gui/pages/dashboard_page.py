@@ -222,7 +222,6 @@ class DashboardPage(QWidget):
         self._main.addStretch(1)
 
         QTimer.singleShot(50, self._relayout_cards)
-        QTimer.singleShot(80, lambda: fade_in(self._content, duration=280))
 
     def _relayout_cards(self) -> None:
         width = max(self._content.width(), self.width(), 400)

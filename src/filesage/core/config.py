@@ -23,7 +23,7 @@ USER_CONFIG_PATH = USER_CONFIG_DIR / "config.yaml"
 
 class AppConfig(BaseModel):
     name: str = "FileSage"
-    version: str = "0.1.0"
+    version: str = "0.8.8"
     dry_run_default: bool = True
 
 
@@ -42,6 +42,7 @@ class ScanConfig(BaseModel):
             "**/Thumbs.db",
         ]
     )
+    use_recommended_excludes: bool = True
 
 
 class HashingConfig(BaseModel):
@@ -63,7 +64,7 @@ class ActionsConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     level: str = "INFO"
-    file: str | None = None
+    file: str | None = "~/.filesage/filesage.log"
     format: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 
 

@@ -122,7 +122,7 @@ class SettingsPage(QWidget):
         s.scan.exclude_patterns = patterns
         s.hashing.algorithm = self.edit_algo.text().strip() or "xxhash64"
         s.hashing.partial_size_kb = self.spin_partial.value()
-        self.engine.action_manager._use_trash = s.actions.use_trash
+        # use_trash se lee en vivo desde settings en ActionManager
 
     def _apply_and_save(self) -> None:
         self._read_form_into_settings()
@@ -165,7 +165,6 @@ class SettingsPage(QWidget):
         self.settings.duplicates.min_size_bytes = loaded.duplicates.min_size_bytes
         self.settings.hashing.algorithm = loaded.hashing.algorithm
         self.settings.hashing.partial_size_kb = loaded.hashing.partial_size_kb
-        self.engine.action_manager._use_trash = self.settings.actions.use_trash
 
         self.chk_dry.setChecked(self.settings.app.dry_run_default)
         self.chk_trash.setChecked(self.settings.actions.use_trash)

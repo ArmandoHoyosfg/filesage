@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from filesage.core.config import load_settings
@@ -18,6 +19,15 @@ def run_gui(config_path: str | None = None) -> int:
     setup_logging(settings.logging)
 
     app = QApplication(sys.argv)
+    try:
+        from filesage.assets import icon_path
+        ico = icon_path("filesage.ico")
+        if not ico.exists():
+            ico = icon_path("filesage.png")
+        if ico.exists():
+            app.setWindowIcon(QIcon(str(ico)))
+    except Exception:
+        pass
     app.setApplicationName(settings.app.name)
     app.setApplicationVersion(settings.app.version)
     app.setStyle("Fusion")  # base limpia para el QSS

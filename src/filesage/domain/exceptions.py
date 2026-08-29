@@ -23,3 +23,7 @@ class ConfigError(FileSageError):
 
 class StorageError(FileSageError):
     """Error de persistencia."""
+
+
+class CancelledError(Exception):
+    """La operacion fue cancelada por el usuario o un token de cancelacion."""

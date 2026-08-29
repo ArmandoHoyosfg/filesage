@@ -18,7 +18,7 @@ from filesage.domain.exceptions import ActionError
 from filesage.domain.interfaces import IActionExecutor, IStorage
 from filesage.domain.models import ActionRecord, ActionType, Transaction
 from filesage.infrastructure.storage import SqliteStorage, new_action_id, new_transaction_id
-from filesage.infrastructure.trash import move_to_trash, permanent_delete, safe_move
+from filesage.infrastructure.trash import move_to_trash, permanent_delete, safe_copy, safe_move
 
 logger = logging.getLogger(__name__)
 
@@ -96,10 +96,15 @@ class ActionManager(IActionExecutor):
             )
 
         try:
-            if planned.action_type == ActionType.TRASH:
+            # Respetar preferencia actual de papelera (config puede cambiar en sesion)
+            action_type = planned.action_type
+            if action_type == ActionType.TRASH and not self._settings.actions.use_trash:
+                action_type = ActionType.DELETE
+
+            if action_type == ActionType.TRASH:
                 move_to_trash(source)
                 message = f"Enviado a papelera: {source}"
-            elif planned.action_type == ActionType.DELETE:
+            elif action_type == ActionType.DELETE:
                 permanent_delete(source)
                 message = f"Eliminado permanentemente: {source}"
             elif planned.action_type == ActionType.MOVE:
@@ -108,7 +113,10 @@ class ActionManager(IActionExecutor):
                 safe_move(source, dest)
                 message = f"Movido: {source} -> {dest}"
             elif planned.action_type == ActionType.COPY:
-                raise ActionError("COPY aun no implementado")
+                if not dest:
+                    raise ActionError("COPY requiere destination")
+                safe_copy(source, dest)
+                message = f"Copiado: {source} -> {dest}"
             else:
                 raise ActionError(f"Tipo de accion no soportado: {planned.action_type}")
 

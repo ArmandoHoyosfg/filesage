@@ -42,6 +42,7 @@ class DuplicateWorker(QThread):
     finished_ok = Signal(object, list)  # ScanResult, list[DuplicateGroup]
     failed = Signal(str)
     progress = Signal(str)
+    progress_fraction = Signal(float)
 
     def __init__(self, engine: Engine, path: Path):
         super().__init__()
@@ -49,12 +50,36 @@ class DuplicateWorker(QThread):
         self.path = path
 
     def run(self) -> None:
+        from filesage.application.progress import ProgressReporter, CancellationToken
+        from filesage.domain.exceptions import CancelledError
+
+        self._token = CancellationToken()
+        def _cb(msg: str, frac: float | None) -> None:
+            if self.isInterruptionRequested():
+                self._token.cancel()
+            self.progress.emit(msg)
+            if frac is not None and hasattr(self, "progress_fraction"):
+                self.progress_fraction.emit(frac)
+
+        reporter = ProgressReporter(callback=_cb, cancel=self._token)
         try:
-            self.progress.emit(f"Escaneando {self.path}...")
-            scan_result, groups = self.engine.find_duplicates(self.path)
+            if self.isInterruptionRequested():
+                self.failed.emit("Cancelado")
+                return
+            scan_result, groups = self.engine.find_duplicates(self.path, progress=reporter)
+            if self.isInterruptionRequested():
+                self.failed.emit("Cancelado")
+                return
             self.finished_ok.emit(scan_result, groups)
+        except CancelledError:
+            self.failed.emit("Cancelado")
         except Exception as exc:
             self.failed.emit(str(exc))
+
+    def requestInterruption(self) -> None:
+        super().requestInterruption()
+        if getattr(self, "_token", None) is not None:
+            self._token.cancel()
 
 
 class StatCard(QFrame):
@@ -115,6 +140,13 @@ class DuplicatesPage(QWidget):
         self.btn_scan.setEnabled(False)
         header.addWidget(self.btn_scan)
 
+        self.btn_cancel = QPushButton("Cancelar")
+        self.btn_cancel.setObjectName("secondary")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setToolTip("Cancelar la busqueda en curso")
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        header.addWidget(self.btn_cancel)
+
         layout.addLayout(header)
 
         # Stats
@@ -130,6 +162,8 @@ class DuplicatesPage(QWidget):
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("Buscando duplicados...")
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
 
@@ -198,7 +232,12 @@ class DuplicatesPage(QWidget):
         self.btn_browse.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("Buscando duplicados...")
         self.status_lbl.setText("Buscando duplicados...")
+        w = self.window()
+        if hasattr(w, "set_status"):
+            w.set_status(f"Buscando duplicados: {self._current_path}")
         self.tree.clear()
         self._groups = []
 
@@ -206,10 +245,13 @@ class DuplicatesPage(QWidget):
         self._worker.finished_ok.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.progress.connect(self.status_lbl.setText)
+        self._worker.progress_fraction.connect(self._on_progress_fraction)
         self._worker.start()
 
     def _on_finished(self, scan_result, groups: list) -> None:
         self.progress.setVisible(False)
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("Buscando duplicados...")
         self.btn_scan.setEnabled(True)
         self.btn_browse.setEnabled(True)
         self.btn_cancel.setEnabled(False)
@@ -256,8 +298,14 @@ class DuplicatesPage(QWidget):
         self.progress.setVisible(False)
         self.btn_scan.setEnabled(True)
         self.btn_browse.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
-        self.status_lbl.setText("Error")
+        if hasattr(self, "btn_cancel"):
+            self.btn_cancel.setEnabled(False)
+        if message == "Cancelado":
+            self.status_lbl.setText("Busqueda cancelada")
+            self.progress.setVisible(False)
+            return
+        self.status_lbl.setText(f"Error: {message}")
+        QMessageBox.critical(self, "Error al buscar duplicados", message)
         QMessageBox.critical(self, "Error", message)
 
     def _select_smart(self) -> None:
@@ -317,6 +365,19 @@ class DuplicatesPage(QWidget):
             f"Exitosas: {ok}/{len(tx.actions)}\n"
             "Revisa el Historial para mas detalles.",
         )
+        self._groups = []
+        self.tree.clear()
+        self.btn_dry_run.setEnabled(False)
+        self.btn_clean.setEnabled(False)
+        if hasattr(self, "btn_export"):
+            self.btn_export.setEnabled(False)
+        if hasattr(self, "btn_move"):
+            self.btn_move.setEnabled(False)
+        if hasattr(self, "btn_select_smart"):
+            self.btn_select_smart.setEnabled(False)
+        self.card_groups.set_value("0")
+        self.card_files.set_value("0")
+        self.card_wasted.set_value("—")
 
     def _on_export(self) -> None:
         if not self._groups or not self._last_root:
@@ -342,7 +403,7 @@ class DuplicatesPage(QWidget):
             return
         dest_path = Path(dest)
         from filesage.domain.models import ActionRecord, ActionType
-        from filesage.infrastructure.storage import new_action_id
+        
         from datetime import datetime
 
         plans = self.engine.plan_trash_duplicates(self._groups, keep_newest=True)
@@ -355,7 +416,7 @@ class DuplicatesPage(QWidget):
                 target = dest_path / f"{p.source.stem}_dup{p.source.suffix}"
             move_plans.append(
                 ActionRecord(
-                    action_id=new_action_id(),
+                    action_id=self.engine.new_action_id(),
                     action_type=ActionType.MOVE,
                     source=p.source,
                     destination=target,
@@ -396,8 +457,17 @@ class DuplicatesPage(QWidget):
 
 
 
+    def _on_progress_fraction(self, frac: float) -> None:
+        if frac < 0:
+            self.progress.setRange(0, 0)
+            return
+        self.progress.setRange(0, 100)
+        self.progress.setValue(int(frac * 100))
+        self.progress.setFormat(f"{int(frac * 100)}%")
+
     def _on_cancel(self) -> None:
         if self._worker and self._worker.isRunning():
             self._worker.requestInterruption()
             self.status_lbl.setText("Cancelando...")
-            self.btn_cancel.setEnabled(False)
+            if hasattr(self, "btn_cancel"):
+                self.btn_cancel.setEnabled(False)

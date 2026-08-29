@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "filesage"
-version = "0.1.0"
+version = "0.8.8"
 description = "Herramienta inteligente y modular para buscar, analizar, mover y eliminar archivos de forma segura (duplicados, espacio en disco, etc.)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = {text = "GPL-3.0-or-later"}
 authors = [
     {name = "FileSage Team"}
 ]
@@ -16,7 +16,7 @@ keywords = ["files", "duplicates", "disk-usage", "cleanup", "file-manager"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -33,7 +33,7 @@ dependencies = [
     "send2trash>=1.8",
     "pyyaml>=6.0",
     "PySide6>=6.6",
-    # Metadatos (activas, no deprecadas, compatibles con MIT)
+    # Metadatos (activas, no deprecadas)
     "Pillow>=10.0",
     "pypdf>=4.0",
     "tinytag>=1.10",
@@ -48,10 +48,19 @@ dev = [
     "ruff>=0.3",
     "mypy>=1.8",
 ]
+web = [
+    "nicegui>=2.0",
+    "pywebview>=5.0",
+]
+network = [
+    "dnspython>=2.6",
+    "icmplib>=3.0",
+]
 
 [project.scripts]
 filesage = "filesage.__main__:main"
 filesage-gui = "filesage.presentation.gui.app:run_gui"
+filesage-web = "filesage.presentation.web:run_web"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -69,3 +78,7 @@ python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+
+[tool.setuptools.package-data]
+filesage = ["assets/icons/*"]

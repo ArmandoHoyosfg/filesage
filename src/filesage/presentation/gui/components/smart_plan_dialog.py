@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -20,7 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from filesage.core.engine import Engine
-from filesage.services.smart_planner import Confidence, SmartPlan, SmartPlanner
+from filesage.application.types import Confidence, SmartPlan
+
 
 
 def _fmt(n: int) -> str:
@@ -33,8 +35,10 @@ def _fmt(n: int) -> str:
 
 
 class PlanWorker(QThread):
-    finished_ok = Signal(object)  # SmartPlan
+    finished_ok = Signal(object)
     failed = Signal(str)
+    progress = Signal(str)
+    progress_fraction = Signal(float)
 
     def __init__(self, engine: Engine, path: Path):
         super().__init__()
@@ -42,13 +46,23 @@ class PlanWorker(QThread):
         self.path = path
 
     def run(self) -> None:
+        from filesage.application.progress import ProgressReporter
+        from filesage.domain.exceptions import CancelledError
+
+        def _cb(msg: str, frac: float | None) -> None:
+            self.progress.emit(msg)
+            if frac is not None:
+                self.progress_fraction.emit(frac)
+
+        reporter = ProgressReporter(callback=_cb)
         try:
-            scan, groups = self.engine.find_duplicates(self.path)
-            planner = SmartPlanner(self.engine.settings)
-            plan = planner.build(scan, groups, include_medium=True, include_low=False)
+            plan = self.engine.build_smart_plan(self.path, progress=reporter)
             self.finished_ok.emit(plan)
+        except CancelledError:
+            self.failed.emit("Cancelado")
         except Exception as e:
             self.failed.emit(str(e))
+
 
 
 class SmartPlanDialog(QDialog):
@@ -57,26 +71,32 @@ class SmartPlanDialog(QDialog):
         self.engine = engine
         self._plan: SmartPlan | None = None
         self._worker: PlanWorker | None = None
+        self._path: Path | None = initial_path
+        self._row_checks: list = []
 
         self.setWindowTitle("Plan inteligente")
-        self.setMinimumSize(640, 480)
+        self.setMinimumSize(720, 520)
+        self.resize(820, 560)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
 
         self.info = QLabel(
-            "FileSage analizara la carpeta y proponda un plan conservador:\n"
-            "• Confianza alta (duplicados exactos) → preseleccionados\n"
-            "• Confianza media (instaladores, vacios, grandes) → opcionales\n"
-            "Nada se borra hasta que confirmes. Siempre puedes simular primero."
+            "Plan conservador: alta = duplicados (preseleccionados) | "
+            "media = instaladores / vacios / organizar por tipo | "
+            "Simula siempre antes de aplicar."
         )
         self.info.setWordWrap(True)
+        self.info.setObjectName("subtitle")
         layout.addWidget(self.info)
 
         path_row = QHBoxLayout()
         self.path_lbl = QLabel(str(initial_path) if initial_path else "Ninguna carpeta")
+        self.path_lbl.setObjectName("subtitle")
         path_row.addWidget(self.path_lbl, stretch=1)
         btn_folder = QPushButton("Elegir carpeta...")
+        btn_folder.setObjectName("secondary")
         btn_folder.clicked.connect(self._pick)
         path_row.addWidget(btn_folder)
         self.btn_analyze = QPushButton("Analizar")
@@ -89,38 +109,64 @@ class SmartPlanDialog(QDialog):
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
 
+        self.status_scan = QLabel("")
+        self.status_scan.setObjectName("subtitle")
+        self.status_scan.setWordWrap(True)
+        layout.addWidget(self.status_scan)
+
+        filter_row = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Filtrar por nombre, extension, tipo o motivo...")
+        self.search.textChanged.connect(self._apply_filter)
+        filter_row.addWidget(self.search, stretch=1)
+        self.btn_sel_all = QPushButton("Seleccionar visibles")
+        self.btn_sel_all.setObjectName("secondary")
+        self.btn_sel_all.setEnabled(False)
+        self.btn_sel_all.clicked.connect(lambda: self._set_visible_selection(True))
+        filter_row.addWidget(self.btn_sel_all)
+        self.btn_sel_none = QPushButton("Quitar seleccion")
+        self.btn_sel_none.setObjectName("secondary")
+        self.btn_sel_none.setEnabled(False)
+        self.btn_sel_none.clicked.connect(lambda: self._set_visible_selection(False))
+        filter_row.addWidget(self.btn_sel_none)
+        self.btn_sel_high = QPushButton("Solo confianza alta")
+        self.btn_sel_high.setObjectName("secondary")
+        self.btn_sel_high.setEnabled(False)
+        self.btn_sel_high.clicked.connect(self._select_high_only)
+        filter_row.addWidget(self.btn_sel_high)
+        layout.addLayout(filter_row)
+
         self.summary = QLabel("")
         self.summary.setObjectName("subtitle")
         layout.addWidget(self.summary)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Incluir", "Confianza", "Tamano", "Que es", "Motivo / archivo"])
-        self.tree.setColumnWidth(0, 60)
-        self.tree.setColumnWidth(1, 90)
+        self.tree.setColumnWidth(0, 55)
+        self.tree.setColumnWidth(1, 85)
         self.tree.setColumnWidth(2, 80)
-        self.tree.setColumnWidth(3, 180)
+        self.tree.setColumnWidth(3, 160)
         self.tree.setAlternatingRowColors(True)
+        self.tree.setRootIsDecorated(False)
         layout.addWidget(self.tree, stretch=1)
 
         actions = QHBoxLayout()
         self.btn_sim = QPushButton("Simular plan")
+        self.btn_sim.setObjectName("secondary")
         self.btn_sim.setEnabled(False)
         self.btn_sim.clicked.connect(self._simulate)
         actions.addWidget(self.btn_sim)
-
         self.btn_apply = QPushButton("Aplicar seleccion")
         self.btn_apply.setObjectName("danger")
         self.btn_apply.setEnabled(False)
         self.btn_apply.clicked.connect(self._apply)
         actions.addWidget(self.btn_apply)
-
         btn_close = QPushButton("Cerrar")
         btn_close.setObjectName("secondary")
         btn_close.clicked.connect(self.reject)
         actions.addWidget(btn_close)
         layout.addLayout(actions)
 
-        self._path = initial_path
         if initial_path:
             self._analyze()
 
@@ -135,12 +181,25 @@ class SmartPlanDialog(QDialog):
             QMessageBox.information(self, "Plan", "Elige una carpeta primero.")
             return
         self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("Analizando...")
+        if hasattr(self, "status_scan"):
+            self.status_scan.setText("Iniciando plan inteligente…")
         self.btn_analyze.setEnabled(False)
         self.tree.clear()
+        self._row_checks.clear()
         self._worker = PlanWorker(self.engine, self._path)
         self._worker.finished_ok.connect(self._on_plan)
         self._worker.failed.connect(self._on_fail)
+        if hasattr(self, "status_scan"):
+            self._worker.progress.connect(self.status_scan.setText)
+        self._worker.progress_fraction.connect(self._on_frac)
         self._worker.start()
+
+    def _on_frac(self, frac: float) -> None:
+        self.progress.setRange(0, 100)
+        self.progress.setValue(int(frac * 100))
+        self.progress.setFormat(f"{int(frac * 100)}%")
 
     def _on_fail(self, msg: str) -> None:
         self.progress.setVisible(False)
@@ -150,21 +209,22 @@ class SmartPlanDialog(QDialog):
     def _on_plan(self, plan: SmartPlan) -> None:
         self.progress.setVisible(False)
         self.btn_analyze.setEnabled(True)
+        if hasattr(self, "status_scan"):
+            self.status_scan.setText("")
         self._plan = plan
         self.tree.clear()
-
+        self._row_checks.clear()
         conf_label = {
             Confidence.HIGH: "Alta",
             Confidence.MEDIUM: "Media",
             Confidence.LOW: "Baja",
         }
-
         for item in plan.items:
             row = QTreeWidgetItem([
                 "",
                 conf_label.get(item.confidence, item.confidence.value),
                 _fmt(item.size),
-                item.what or "—",
+                item.what or "-",
                 f"{item.reason}\n{item.path}",
             ])
             row.setData(0, Qt.ItemDataRole.UserRole, item)
@@ -173,19 +233,47 @@ class SmartPlanDialog(QDialog):
             chk.setChecked(item.selected)
             chk.stateChanged.connect(lambda state, it=item: self._toggle(it, state))
             self.tree.setItemWidget(row, 0, chk)
-
-        self.summary.setText(
-            f"Archivos escaneados: {plan.scan_files} · "
-            f"Grupos duplicados: {plan.duplicate_groups} · "
-            f"Candidatos: {len(plan.items)} · "
-            f"Preseleccionados: {len(plan.selected_items)} ({_fmt(plan.selected_bytes)})"
-        )
-        self.btn_sim.setEnabled(len(plan.items) > 0)
-        self.btn_apply.setEnabled(len(plan.selected_items) > 0)
+            self._row_checks.append((item, chk, row))
+        for b in (self.btn_sel_all, self.btn_sel_none, self.btn_sel_high, self.btn_sim):
+            b.setEnabled(len(plan.items) > 0)
+        self.search.clear()
         self._refresh_apply_state()
 
     def _toggle(self, item, state) -> None:
         item.selected = state == Qt.CheckState.Checked.value or state == 2
+        self._refresh_apply_state()
+
+    def _apply_filter(self, text: str) -> None:
+        q = text.strip().lower()
+        for item, chk, row in self._row_checks:
+            hay = " ".join([
+                str(item.path),
+                item.path.suffix,
+                item.reason,
+                item.what or "",
+                item.category,
+                item.confidence.value,
+                str(item.metadata.get("mime", "")),
+            ]).lower()
+            row.setHidden(bool(q) and q not in hay)
+
+    def _set_visible_selection(self, selected: bool) -> None:
+        for item, chk, row in self._row_checks:
+            if row.isHidden():
+                continue
+            chk.blockSignals(True)
+            chk.setChecked(selected)
+            chk.blockSignals(False)
+            item.selected = selected
+        self._refresh_apply_state()
+
+    def _select_high_only(self) -> None:
+        for item, chk, row in self._row_checks:
+            want = item.confidence == Confidence.HIGH
+            chk.blockSignals(True)
+            chk.setChecked(want)
+            chk.blockSignals(False)
+            item.selected = want
         self._refresh_apply_state()
 
     def _refresh_apply_state(self) -> None:
@@ -194,8 +282,9 @@ class SmartPlanDialog(QDialog):
         n = len(self._plan.selected_items)
         b = self._plan.selected_bytes
         self.btn_apply.setEnabled(n > 0)
+        self.btn_sim.setEnabled(len(self._plan.items) > 0)
         self.summary.setText(
-            f"Archivos escaneados: {self._plan.scan_files} · "
+            f"Escaneados: {self._plan.scan_files} · "
             f"Candidatos: {len(self._plan.items)} · "
             f"Seleccionados: {n} ({_fmt(b)})"
         )
@@ -203,8 +292,7 @@ class SmartPlanDialog(QDialog):
     def _simulate(self) -> None:
         if not self._plan:
             return
-        planner = SmartPlanner(self.engine.settings)
-        actions = planner.to_trash_actions(self._plan)
+        actions = self.engine.smart_plan_to_actions(self._plan)
         if not actions:
             QMessageBox.information(self, "Simular", "No hay elementos seleccionados.")
             return
@@ -213,8 +301,8 @@ class SmartPlanDialog(QDialog):
             self,
             "Simulacion",
             f"Dry-run OK.\nTransaccion: {tx.transaction_id}\n"
-            f"Se enviarian {len(actions)} archivos a la papelera "
-            f"({_fmt(self._plan.selected_bytes)}).\n\nNingun archivo se ha modificado.",
+            f"Acciones: {len(actions)} ({_fmt(self._plan.selected_bytes)}).\n\n"
+            "Ningun archivo se ha modificado.",
         )
 
     def _apply(self) -> None:
@@ -223,16 +311,14 @@ class SmartPlanDialog(QDialog):
         reply = QMessageBox.warning(
             self,
             "Confirmar plan inteligente",
-            f"Se aplicaran {len(self._plan.selected_items)} acciones (papelera y/o mover a carpetas) "
+            f"Se aplicaran {len(self._plan.selected_items)} acciones "
             f"({_fmt(self._plan.selected_bytes)}).\n\n"
-            "Confianza alta = duplicados exactos (se mantiene 1 copia).\n"
-            "Puedes recuperarlos desde la papelera del sistema.\n\n¿Continuar?",
+            "Pueden incluir papelera y/o mover a carpetas.\nContinuar?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        planner = SmartPlanner(self.engine.settings)
-        actions = planner.to_trash_actions(self._plan)
+        actions = self.engine.smart_plan_to_actions(self._plan)
         tx = self.engine.execute_actions(actions, dry_run=False)
         ok = sum(1 for a in tx.actions if a.success)
         QMessageBox.information(

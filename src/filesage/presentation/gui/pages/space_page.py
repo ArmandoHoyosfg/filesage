@@ -43,20 +43,48 @@ class ScanWorker(QThread):
     finished_ok = Signal(object, object)  # ScanResult, SpaceReport
     failed = Signal(str)
     progress = Signal(str)
+    progress_fraction = Signal(float)  # 0..1, -1 = desconocido
 
     def __init__(self, engine: Engine, path: Path, top_n: int = 30):
         super().__init__()
         self.engine = engine
         self.path = path
         self.top_n = top_n
+        self._token = None
 
     def run(self) -> None:
+        from filesage.application.progress import ProgressReporter, CancellationToken
+        from filesage.domain.exceptions import CancelledError
+
+        self._token = CancellationToken()
+        def _cb(msg: str, frac: float | None) -> None:
+            if self.isInterruptionRequested():
+                self._token.cancel()
+            self.progress.emit(msg)
+            if frac is not None:
+                self.progress_fraction.emit(frac)
+
+        reporter = ProgressReporter(callback=_cb, cancel=self._token)
         try:
-            self.progress.emit(f"Escaneando {self.path}...")
-            scan_result, report = self.engine.analyze_space(self.path, top_n=self.top_n)
+            if self.isInterruptionRequested():
+                self.failed.emit("Cancelado")
+                return
+            scan_result, report = self.engine.analyze_space(
+                self.path, top_n=self.top_n, progress=reporter
+            )
+            if self.isInterruptionRequested():
+                self.failed.emit("Cancelado")
+                return
             self.finished_ok.emit(scan_result, report)
+        except CancelledError:
+            self.failed.emit("Cancelado")
         except Exception as exc:
             self.failed.emit(str(exc))
+
+    def requestInterruption(self) -> None:
+        super().requestInterruption()
+        if self._token is not None:
+            self._token.cancel()
 
 
 class StatCard(QFrame):
@@ -132,6 +160,13 @@ class SpacePage(QWidget):
         self.btn_export.clicked.connect(self._on_export)
         header.addWidget(self.btn_export)
 
+        self.btn_cancel = QPushButton("Cancelar")
+        self.btn_cancel.setObjectName("secondary")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setToolTip("Cancelar el analisis en curso")
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        header.addWidget(self.btn_cancel)
+
         layout.addLayout(header)
 
         # Stats cards
@@ -148,6 +183,8 @@ class SpacePage(QWidget):
         # Progress
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)  # indeterminado
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("Analizando...")
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
 
@@ -191,6 +228,11 @@ class SpacePage(QWidget):
         self.btn_browse.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("Analizando...")
+        w = self.window()
+        if hasattr(w, "set_status"):
+            w.set_status(f"Analizando espacio: {self._current_path}")
         self.status_lbl.setText("Analizando...")
         self.table.setRowCount(0)
         self.ext_table.setRowCount(0)
@@ -199,6 +241,7 @@ class SpacePage(QWidget):
         self._worker.finished_ok.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.progress.connect(self.status_lbl.setText)
+        self._worker.progress_fraction.connect(self._on_progress_fraction)
         self._worker.start()
 
     def _on_finished(self, scan_result, report: SpaceReport) -> None:
@@ -244,8 +287,12 @@ class SpacePage(QWidget):
         self.btn_analyze.setEnabled(True)
         self.btn_browse.setEnabled(True)
         self.btn_cancel.setEnabled(False)
-        self.status_lbl.setText("Error")
-        QMessageBox.critical(self, "Error de analisis", message)
+        if message == "Cancelado":
+            self.status_lbl.setText("Analisis cancelado")
+            self.progress.setVisible(False)
+            return
+        self.status_lbl.setText(f"Error: {message}")
+        QMessageBox.critical(self, "Error al analizar", message)
 
     def _on_export(self) -> None:
         if not self._last_report or not self._last_scan:
@@ -262,6 +309,14 @@ class SpacePage(QWidget):
             QMessageBox.information(self, "Exportar", f"Reporte guardado en:\n{out}")
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
+
+    def _on_progress_fraction(self, frac: float) -> None:
+        if frac < 0:
+            self.progress.setRange(0, 0)
+            return
+        self.progress.setRange(0, 100)
+        self.progress.setValue(int(frac * 100))
+        self.progress.setFormat(f"{int(frac * 100)}%")
 
     def _on_cancel(self) -> None:
         if self._worker and self._worker.isRunning():

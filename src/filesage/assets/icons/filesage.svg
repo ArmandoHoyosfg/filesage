@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="FileSage">
+  <defs>
+    <linearGradient id="g" x1="20%" y1="10%" x2="90%" y2="95%">
+      <stop offset="0%" stop-color="#c4b5fd"/>
+      <stop offset="45%" stop-color="#8b9cff"/>
+      <stop offset="100%" stop-color="#67e8f9"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a1a24"/>
+      <stop offset="100%" stop-color="#0b0b10"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <!-- rounded app tile -->
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#g2)"/>
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="none" stroke="url(#g)" stroke-width="6" opacity="0.85"/>
+  <!-- file back -->
+  <path d="M78 64h72l28 28v96c0 8-6 14-14 14H78c-8 0-14-6-14-14V78c0-8 6-14 14-14z"
+        fill="#252536" stroke="url(#g)" stroke-width="4"/>
+  <path d="M150 64v28h28" fill="none" stroke="url(#g)" stroke-width="4" stroke-linejoin="round"/>
+  <!-- file front (offset) -->
+  <path d="M98 84h72l28 28v96c0 8-6 14-14 14H98c-8 0-14-6-14-14V98c0-8 6-14 14-14z"
+        fill="#2a2a3c" stroke="url(#g)" stroke-width="4"/>
+  <path d="M170 84v28h28" fill="none" stroke="url(#g)" stroke-width="4" stroke-linejoin="round"/>
+  <!-- leaf / sage mark -->
+  <path d="M128 118c22 8 38 28 42 52-18-6-34-20-42-40-8 20-24 34-42 40 4-24 20-44 42-52z"
+        fill="url(#g)" opacity="0.95"/>
+  <path d="M128 122v48" stroke="#0b0b10" stroke-width="3.5" stroke-linecap="round" opacity="0.45"/>
+</svg>
