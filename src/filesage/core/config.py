@@ -23,7 +23,7 @@ USER_CONFIG_PATH = USER_CONFIG_DIR / "config.yaml"
 
 class AppConfig(BaseModel):
     name: str = "FileSage"
-    version: str = "0.8.9"
+    version: str = "0.8.10"
     dry_run_default: bool = True
 
 

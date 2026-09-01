@@ -55,6 +55,7 @@ class DuplicateFinder(IDuplicateFinder):
         logger.info("Grupos por tamano: %d (candidatos tras filtro: %d)", len(size_groups), sum(len(v) for v in size_groups.values()))
         if progress:
             progress.report(f"Grupos por tamaño: {len(size_groups)}", 0.15)
+            progress.report("Calculando hashes parciales…", 0.2)
             progress.check()
 
         # --- Etapa 2: hash parcial ---

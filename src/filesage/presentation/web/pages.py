@@ -207,7 +207,7 @@ def page_duplicates() -> None:
     }
 
     with page_frame("Duplicados", active_path="/duplicates"):
-        section_title("Duplicados", "Compara contenido real. Cancela si tarda demasiado.")
+        section_title("Duplicados", "Compara contenido real. Veras el avance abajo; puedes cancelar si tarda demasiado.")
         folder = folder_field(
             label="Carpeta",
             value=str(saved["root"]) if saved.get("root") else None,
@@ -325,7 +325,9 @@ def page_duplicates() -> None:
 
             try:
                 result = await job.run(
-                    work, start_msg=f"Buscando en {root}…", success_notice=None
+                    work,
+                    start_msg=f"Buscando duplicados en {root}…",
+                    success_notice=None,
                 )
             except Exception:
                 btn_run.set_enabled(True)

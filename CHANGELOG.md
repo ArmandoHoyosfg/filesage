@@ -3,6 +3,12 @@
 Todos los cambios relevantes de FileSage se documentan aqui.
 Formato basado en [Keep a Changelog](https://keepachangelog.com/) y [Semantic Versioning](https://semver.org/).
 
+## [0.8.10] - 2026-08-29
+
+### Improved
+- Panel de Estado/progreso siempre visible (barra, %, cancelar)
+- Duplicados: progreso por fases (escaneo 0–40 %, hash 40–100 %)
+
 ## [0.8.9] - 2026-08-29
 
 ### Improved

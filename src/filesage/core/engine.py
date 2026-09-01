@@ -55,8 +55,32 @@ class Engine:
     def find_duplicates(
         self, root: Path, *, progress: ProgressReporter | None = None
     ) -> tuple[ScanResult, list[DuplicateGroup]]:
-        scan_result = self.scanner.scan(root, progress=progress)
-        groups = self.duplicate_finder.find(scan_result.files, progress=progress)
+        # Escanear 0–40 %, hashing 40–100 %
+        scan_reporter = progress
+        hash_reporter = progress
+        if progress is not None:
+            def _scan_cb(msg: str, frac: float | None) -> None:
+                mapped = None if frac is None else 0.4 * max(0.0, min(1.0, frac))
+                progress.report(f"Escaneo: {msg}", mapped)
+
+            def _hash_cb(msg: str, frac: float | None) -> None:
+                mapped = None if frac is None else 0.4 + 0.6 * max(0.0, min(1.0, frac))
+                progress.report(msg, mapped)
+
+            scan_reporter = ProgressReporter(callback=_scan_cb, cancel=progress.cancel)
+            hash_reporter = ProgressReporter(callback=_hash_cb, cancel=progress.cancel)
+
+        if progress:
+            progress.report("Iniciando busqueda de duplicados…", 0.0)
+        scan_result = self.scanner.scan(root, progress=scan_reporter)
+        if progress:
+            progress.report(
+                f"Escaneo listo · {scan_result.total_files} archivos — comparando…",
+                0.4,
+            )
+        groups = self.duplicate_finder.find(scan_result.files, progress=hash_reporter)
+        if progress:
+            progress.report(f"{len(groups)} grupos de duplicados", 1.0)
         return scan_result, groups
 
     def find_duplicates_from_scan(
