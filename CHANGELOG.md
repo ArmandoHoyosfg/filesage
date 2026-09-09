@@ -3,6 +3,40 @@
 Todos los cambios relevantes de FileSage se documentan aqui.
 Formato basado en [Keep a Changelog](https://keepachangelog.com/) y [Semantic Versioning](https://semver.org/).
 
+## [0.8.16] - 2026-09-01
+
+### Improved
+- Buscar: operaciones in-situ con barra de progreso (papelera, duplicados, convertir)
+- execute_actions_progressed en el motor
+- Navegar a otras secciones queda como opcion avanzada
+
+## [0.8.15] - 2026-09-01
+
+### Improved
+- Busqueda inteligente: ignora carpetas FileSage_* y metadatos genericos; prioriza nombre
+
+## [0.8.14] - 2026-09-01
+
+### Fixed
+- Buscar: por defecto solo nombre de archivo (no carpetas como FileSage_converted)
+
+## [0.8.13] - 2026-09-01
+
+### Added
+- Buscar: acciones (papelera, exportar, copiar) y puente a Duplicados/Smart/Convertir/Organizar/Limpieza
+- Seleccion compartida entre herramientas (session_store)
+
+## [0.8.12] - 2026-09-01
+
+### Fixed
+- Duplicados: solo contenido identico (hash multi-region + completo + verificacion)
+- Mismo tamano ya no genera falsos positivos (p. ej. MP3 distintos)
+
+## [0.8.11] - 2026-09-01
+
+### Fixed
+- Convertidor: no duplica salidas; detecta formato real; omite *_converted y destinos existentes
+
 ## [0.8.10] - 2026-08-29
 
 ### Improved

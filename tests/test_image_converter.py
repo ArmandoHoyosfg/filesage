@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from filesage.services.image_converter import convert_path, convert_one, default_output_dir
+from filesage.services.image_converter import (
+    convert_path,
+    convert_one,
+    detect_image_format,
+    looks_like_converted_name,
+)
 
 
 def test_convert_png_to_jpg(tmp_path: Path):
@@ -26,7 +31,6 @@ def test_skip_same_format(tmp_path: Path):
     Image.new("RGB", (8, 8), color=(1, 2, 3)).save(src)
     r = convert_one(src, tmp_path / "out", target_ext="png")
     assert r.skipped and r.ok
-    assert r.destination is None
 
 
 def test_skip_jpeg_jpg_equiv(tmp_path: Path):
@@ -39,6 +43,37 @@ def test_skip_jpeg_jpg_equiv(tmp_path: Path):
     assert r.skipped
 
 
+def test_skip_when_dest_exists_no_duplicate(tmp_path: Path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    src = tmp_path / "photo.webp"
+    Image.new("RGB", (8, 8), color=(9, 8, 7)).save(src, "WEBP")
+    out = tmp_path / "out"
+    r1 = convert_one(src, out, target_ext="png")
+    assert r1.ok and not r1.skipped
+    assert r1.destination and r1.destination.exists()
+    # segunda pasada: no debe crear photo_converted.png
+    r2 = convert_one(src, out, target_ext="png")
+    assert r2.skipped
+    assert list(out.glob("*")) == [r1.destination]
+
+
+def test_skip_converted_name(tmp_path: Path):
+    assert looks_like_converted_name(Path("foo_converted.png"))
+    assert looks_like_converted_name(Path("foo_converted2.jpg"))
+    assert not looks_like_converted_name(Path("foo.png"))
+
+
+def test_detect_format(tmp_path: Path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    src = tmp_path / "x.bin"
+    Image.new("RGB", (4, 4), color=(1, 1, 1)).save(src, "PNG")
+    assert detect_image_format(src) == "png"
+
+
 def test_skip_inside_converted(tmp_path: Path):
     pytest.importorskip("PIL")
     from PIL import Image
@@ -48,12 +83,7 @@ def test_skip_inside_converted(tmp_path: Path):
     src = conv / "x.webp"
     Image.new("RGB", (8, 8), color=(1, 2, 3)).save(src)
     results = convert_path(tmp_path, target_ext="png", recursive=True)
-    # should not convert the one inside converted (filtered) or skip it
-    assert all(
-        (not r.ok) or r.skipped or "FileSage_converted" not in str(r.source)
-        for r in results
-        if r.destination
-    )
+    assert not any(r.destination and r.ok and not r.skipped for r in results)
 
 
 def test_convert_folder(tmp_path: Path):

@@ -23,6 +23,8 @@ from filesage.presentation.web.path_picker import folder_field, workspace_bar
 from filesage.presentation.web.context import get_workspace
 from filesage.core.workspace_safety import assess_workspace
 from filesage.presentation.web.session_store import bind_busy_button
+from filesage.presentation.web.selection_ui import selection_banner
+from filesage.services.file_search import match_file, rank_hits
 
 
 def _fmt(n: int) -> str:
@@ -207,7 +209,8 @@ def page_duplicates() -> None:
     }
 
     with page_frame("Duplicados", active_path="/duplicates"):
-        section_title("Duplicados", "Compara contenido real. Veras el avance abajo; puedes cancelar si tarda demasiado.")
+        section_title("Duplicados", "Solo archivos con el MISMO contenido (hash completo). Mismo tamano no basta. Cancela si tarda.")
+        selection_banner(tool="duplicates")
         folder = folder_field(
             label="Carpeta",
             value=str(saved["root"]) if saved.get("root") else None,
@@ -247,9 +250,15 @@ def page_duplicates() -> None:
 
                     async def do_clean() -> None:
                         dialog.close()
-                        tx = await asyncio.to_thread(
-                            lambda: engine.execute_actions(plans, dry_run=False)
+                        def work(reporter):
+                            return engine.execute_actions_progressed(
+                                plans, dry_run=False, progress=reporter
+                            )
+                        tx = await job.run(
+                            work, start_msg=f"Enviando {len(plans)} a papelera…"
                         )
+                        if tx is None:
+                            return
                         ok = sum(1 for a in tx.actions if a.success)
                         ui.notify(f"Limpieza: {ok}/{len(tx.actions)} OK", type="positive", position="top")
                         state["groups"] = []
@@ -285,10 +294,14 @@ def page_duplicates() -> None:
                     )
                     return
                 for i, g in enumerate(groups[:40], 1):
+                    hh = (g.hash_full or "")[:12]
                     with ui.expansion(
-                        f"Grupo {i}: {g.count} archivos · {_fmt(g.wasted_size)} recuperable",
+                        f"Grupo {i}: {g.count} archivos · {_fmt(g.wasted_size)} recuperable · hash {hh}…",
                         icon="content_copy",
                     ).classes("w-full"):
+                        ui.label("Contenido binario identico (no solo tamano).").classes(
+                            "text-xs text-[#6b6b80] mb-1"
+                        )
                         for fi in g.files:
                             ui.label(f"{fi.path} ({_fmt(fi.size)})").classes("text-sm")
             if groups:
@@ -372,6 +385,7 @@ def page_smart() -> None:
     }
 
     with page_frame("Smart", active_path="/smart"):
+        selection_banner(tool="smart")
         section_title(
             "Plan inteligente",
             "Marca o desmarca archivos. Los resultados se conservan al cambiar de seccion.",
@@ -553,71 +567,417 @@ def page_smart() -> None:
         btn_run.on_click(build)
 
 
+
 @ui.page("/search")
 def page_search() -> None:
+    """Busqueda + acciones + puente hacia otras herramientas."""
+    from datetime import datetime
+
+    from filesage.domain.models import ActionRecord, ActionType, FileInfo
+    from filesage.infrastructure.storage import new_action_id
+
     engine = get_engine()
     saved = session_store.get_page_state("/search")
     state: dict = {
-        "results": list(saved.get("results") or []),
+        "results": list(saved.get("results") or []),  # list[tuple path_str, size, what]
+        "checks": dict(saved.get("checks") or {}),
         "status": saved.get("status", ""),
         "query": saved.get("query", ""),
     }
+    # Normalizar resultados antiguos (fi, what) → serializables
+    norm_results: list[dict] = []
+    for item in state["results"]:
+        if isinstance(item, dict):
+            norm_results.append(item)
+        else:
+            try:
+                fi, what = item
+                norm_results.append(
+                    {
+                        "path": str(fi.path),
+                        "name": fi.path.name,
+                        "parent": str(fi.path.parent),
+                        "size": int(fi.size),
+                        "what": what or "",
+                    }
+                )
+            except Exception:
+                continue
+    state["results"] = norm_results
 
     with page_frame("Buscar", active_path="/search"):
         section_title(
             "Buscar archivos",
-            "Puedes cancelar si la carpeta es grande. Resultados se conservan al salir.",
+            "Coincide por nombre de archivo. La ruta de carpetas solo si lo activas.",
         )
         folder = folder_field(label="Carpeta raiz", value=saved.get("folder_path"))
         query_input = ui.input(
-            "Texto (nombre, extension…)",
+            "Texto (nombre, extension, ruta…)",
             value=state["query"],
-            placeholder="ej. .pdf  o  factura",
+            placeholder="ej. .pdf  ·  factura  ·  .mp3",
         ).classes("w-full max-w-xl")
-        use_meta = ui.checkbox(
-            "Incluir metadatos (mas lento)", value=bool(saved.get("use_meta"))
-        )
+        with ui.row().classes("gap-4 flex-wrap items-center"):
+            use_meta = ui.checkbox(
+                "Incluir metadatos (mas lento)", value=bool(saved.get("use_meta"))
+            )
+            use_path = ui.checkbox(
+                "Buscar tambien en la ruta completa",
+                value=bool(saved.get("use_path")),
+            )
+            only_ext = ui.input(
+                "Filtrar extension (opcional)",
+                value=saved.get("ext_filter") or "",
+                placeholder=".jpg",
+            ).classes("max-w-xs")
+        ui.label(
+            "Inteligente: prioriza el nombre del archivo. Las carpetas de la app "
+            "(FileSage_converted, etc.) no cuentan como coincidencia de ruta. "
+            "Metadatos genericos (JPEG, Imagen…) no disparan resultados por si solos."
+        ).classes("text-xs text-[#6b6b80] max-w-2xl")
         btn_run = ui.button("Buscar", icon="search").props("color=primary unelevated")
         job = JobControls(page_route="/search")
         bind_busy_button(btn_run)
-        result_area = ui.column().classes("w-full")
+        summary = ui.label(state.get("status") or "").classes("text-sm text-[#9898b0]")
+        actions_row = ui.row().classes("gap-2 flex-wrap")
+        bridge_row = ui.row().classes("gap-2 flex-wrap")
+        result_area = ui.column().classes("w-full gap-2")
 
-        def _render_search_results() -> None:
+        def _selected_paths() -> list[Path]:
+            out: list[Path] = []
+            for row in state["results"]:
+                p = str(row.get("path") or "")
+                if p and state["checks"].get(p, False):
+                    out.append(Path(p))
+            return out
+
+        def _update_summary() -> None:
+            n = sum(1 for v in state["checks"].values() if v)
+            total = len(state["results"])
+            summary.set_text(f"{n} seleccionados · {total} resultados")
+            session_store.update_page_state(
+                "/search",
+                results=list(state["results"]),
+                checks=dict(state["checks"]),
+                status=summary.text,
+                query=state.get("query") or "",
+            )
+
+        def select_all(val: bool) -> None:
+            for row in state["results"]:
+                state["checks"][str(row["path"])] = val
+            render()
+            _update_summary()
+
+        def render() -> None:
             result_area.clear()
-            results = state.get("results") or []
+            actions_row.clear()
+            bridge_row.clear()
             with result_area:
-                if not results:
+                if not state["results"]:
                     empty_state(
                         "Escribe un criterio y busca",
-                        "Los resultados se conservan al cambiar de seccion.",
+                        "Luego podras actuar sobre la seleccion o enviarla a otra herramienta.",
                         icon="search",
                     )
                     return
-                rows = [
-                    {
-                        "archivo": fi.path.name,
-                        "ruta": str(fi.path.parent),
-                        "tamano": _fmt(fi.size),
-                        "que": what or "",
+                with ui.row().classes("gap-2 mb-2 flex-wrap"):
+                    ui.button("Seleccionar todos", on_click=lambda: select_all(True)).props(
+                        "outline dense"
+                    )
+                    ui.button("Quitar seleccion", on_click=lambda: select_all(False)).props(
+                        "outline dense"
+                    )
+                for row in state["results"][:400]:
+                    p = str(row["path"])
+                    if p not in state["checks"]:
+                        state["checks"][p] = False
+                    with ui.card().classes("fs-card w-full p-3"):
+                        with ui.row().classes("items-start gap-3 w-full no-wrap"):
+                            ui.checkbox(value=state["checks"][p]).on_value_change(
+                                lambda e, k=p: (
+                                    state["checks"].__setitem__(k, bool(e.value)),
+                                    _update_summary(),
+                                )
+                            )
+                            with ui.column().classes("gap-0 flex-grow"):
+                                ui.label(row.get("name") or Path(p).name).classes(
+                                    "font-medium"
+                                )
+                                ui.label(row.get("parent") or "").classes(
+                                    "text-xs text-[#6b6b80] break-all"
+                                )
+                                if row.get("what"):
+                                    ui.label(str(row["what"])).classes(
+                                        "text-xs text-[#7c9cff]"
+                                    )
+                                if row.get("why"):
+                                    ui.label(f"Coincide por: {row['why']}").classes(
+                                        "text-xs text-[#6b6b80]"
+                                    )
+                            ui.label(_fmt(int(row.get("size") or 0))).classes(
+                                "text-sm text-primary"
+                            )
+            _update_summary()
+            with actions_row:
+                ui.label("Acciones sobre la selección (aquí mismo)").classes(
+                    "text-xs text-[#9898b0] w-full"
+                )
+                ui.button(
+                    "Simular → papelera",
+                    on_click=lambda: do_trash(True),
+                    icon="science",
+                ).props("outline color=primary")
+                ui.button(
+                    "Enviar a papelera",
+                    on_click=lambda: do_trash(False),
+                    icon="delete",
+                ).props("color=negative unelevated")
+                ui.button(
+                    "Buscar duplicados entre selección",
+                    on_click=dups_in_selection,
+                    icon="content_copy",
+                ).props("outline color=primary")
+                ui.button(
+                    "Convertir imágenes seleccionadas",
+                    on_click=convert_selected,
+                    icon="transform",
+                ).props("outline color=primary")
+                ui.button("Copiar rutas", on_click=copy_paths, icon="content_copy").props(
+                    "outline"
+                )
+                ui.button("Exportar lista", on_click=export_list, icon="download").props(
+                    "outline"
+                )
+            with bridge_row:
+                with ui.expansion("Opciones avanzadas: abrir otra sección", icon="open_in_new").classes(
+                    "w-full max-w-2xl"
+                ):
+                    ui.label(
+                        "Solo si prefieres el flujo completo de esa herramienta."
+                    ).classes("text-xs text-[#9898b0] mb-2")
+                    with ui.row().classes("gap-2 flex-wrap"):
+                        ui.button("Duplicados", on_click=lambda: send_to("/duplicates", "duplicates")).props("flat dense")
+                        ui.button("Smart", on_click=lambda: send_to("/smart", "smart")).props("flat dense")
+                        ui.button("Organizar", on_click=lambda: send_to("/tools/organize", "organize")).props("flat dense")
+                        ui.button("Limpieza", on_click=lambda: send_to("/tools/cleanup", "cleanup")).props("flat dense")
+
+        def publish_selection() -> list[str]:
+            paths = [str(p) for p in _selected_paths()]
+            if not paths:
+                ui.notify("Selecciona al menos un archivo", type="warning")
+                return []
+            session_store.set_selection(
+                paths, source="search", label=f"Busqueda: {len(paths)} archivos"
+            )
+            return paths
+
+        def send_to(route: str, kind: str) -> None:
+            paths = publish_selection()
+            if not paths:
+                return
+            # Sugerir carpeta comun si todas comparten padre
+            parents = {str(Path(p).parent) for p in paths}
+            if len(parents) == 1:
+                common = next(iter(parents))
+                session_store.update_page_state(
+                    route,
+                    folder_path=common,
+                    from_search=True,
+                    selection_hint=f"{len(paths)} desde Buscar",
+                )
+            ui.notify(
+                f"{len(paths)} archivos listos para {kind}. Abriendo herramienta…",
+                type="positive",
+            )
+            ui.navigate.to(route)
+
+        def _trash_actions(paths: list[Path]):
+            return [
+                ActionRecord(
+                    action_id=new_action_id(),
+                    action_type=ActionType.TRASH,
+                    source=p,
+                    destination=None,
+                    timestamp=datetime.now(),
+                    success=False,
+                    message="",
+                    dry_run=True,
+                    metadata={"from": "search"},
+                )
+                for p in paths
+            ]
+
+        async def do_trash(dry: bool) -> None:
+            paths = _selected_paths()
+            if not paths:
+                ui.notify("Selecciona al menos un archivo", type="warning")
+                return
+            actions = _trash_actions(paths)
+
+            async def run_batch(dry_run: bool) -> None:
+                def work(reporter):
+                    return engine.execute_actions_progressed(
+                        actions, dry_run=dry_run, progress=reporter
+                    )
+
+                tx = await job.run(
+                    work,
+                    start_msg=(
+                        f"{'Simulando' if dry_run else 'Enviando a papelera'} "
+                        f"{len(actions)} archivo(s)…"
+                    ),
+                    success_notice=None,
+                )
+                if tx is None:
+                    return
+                ok = sum(1 for a in tx.actions if a.success)
+                msg = (
+                    f"{'Simulación' if dry_run else 'Papelera'}: {ok}/{len(tx.actions)} OK"
+                )
+                job.status.set_text(msg)
+                ui.notify(msg, type="positive", position="top")
+                if not dry_run:
+                    done = {str(a.source) for a in tx.actions if a.success}
+                    state["results"] = [
+                        r for r in state["results"] if r["path"] not in done
+                    ]
+                    state["checks"] = {
+                        r["path"]: state["checks"].get(r["path"], False)
+                        for r in state["results"]
                     }
-                    for fi, what in results
-                ]
-                ui.table(
-                    columns=[
-                        {"name": "archivo", "label": "Archivo", "field": "archivo"},
-                        {"name": "ruta", "label": "Ruta", "field": "ruta"},
-                        {"name": "tamano", "label": "Tamano", "field": "tamano"},
-                        {"name": "que", "label": "Que es", "field": "que"},
-                    ],
-                    rows=rows,
-                    row_key="ruta",
-                    pagination=25,
-                ).classes("w-full")
+                    render()
 
-        _render_search_results()
-        if state.get("status"):
-            job.status.set_text(state["status"])
+            if dry:
+                await run_batch(True)
+                return
 
+            with ui.dialog() as dialog, ui.card().classes("fs-card p-4 max-w-md"):
+                ui.label("Enviar a papelera").classes("font-bold")
+                ui.label(
+                    f"{len(paths)} archivos. Verás el progreso abajo. Escribe OK."
+                ).classes("text-sm text-[#9898b0]")
+                conf = ui.input("Confirmacion").classes("w-full")
+                with ui.row().classes("justify-end gap-2"):
+                    ui.button("Cancelar", on_click=dialog.close).props("flat")
+
+                    async def go() -> None:
+                        if (conf.value or "").strip().upper() != "OK":
+                            ui.notify("Escribe OK", type="warning")
+                            return
+                        dialog.close()
+                        await run_batch(False)
+
+                    ui.button("Confirmar", on_click=go).props("color=negative")
+            dialog.open()
+
+        async def dups_in_selection() -> None:
+            paths = _selected_paths()
+            if len(paths) < 2:
+                ui.notify("Selecciona al menos 2 archivos", type="warning")
+                return
+
+            def work(reporter):
+                from filesage.domain.models import FileInfo
+                import os
+                files = []
+                for p in paths:
+                    try:
+                        st = p.stat()
+                        files.append(
+                            FileInfo(
+                                path=p,
+                                size=st.st_size,
+                                mtime=st.st_mtime,
+                                is_symlink=p.is_symlink(),
+                            )
+                        )
+                    except OSError:
+                        continue
+                reporter.report(f"Comparando {len(files)} archivos…", 0.1)
+                groups = engine.duplicate_finder.find(files, progress=reporter)
+                return groups
+
+            groups = await job.run(
+                work, start_msg="Buscando duplicados en la selección…"
+            )
+            if groups is None:
+                return
+            if not groups:
+                ui.notify("No hay duplicados exactos en la selección", type="info")
+                job.status.set_text("Sin duplicados en la selección")
+                return
+            wasted = sum(g.wasted_size for g in groups)
+            msg = f"{len(groups)} grupos · {_fmt(wasted)} recuperables"
+            job.status.set_text(msg)
+            ui.notify(msg, type="positive")
+            # Mostrar resumen en expansion
+            with result_area:
+                ui.label(f"Duplicados en selección: {msg}").classes(
+                    "font-semibold text-primary mt-2"
+                )
+                for i, g in enumerate(groups[:20], 1):
+                    names = ", ".join(f.path.name for f in g.files[:5])
+                    ui.label(f"Grupo {i}: {names}").classes("text-sm")
+
+        async def convert_selected() -> None:
+            paths = _selected_paths()
+            img_ext = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+            imgs = [p for p in paths if p.suffix.lower() in img_ext]
+            if not imgs:
+                ui.notify("No hay imágenes en la selección", type="warning")
+                return
+
+            def work(reporter):
+                from filesage.services.image_converter import convert_one, default_output_dir
+                results = []
+                for i, img in enumerate(imgs):
+                    reporter.report(
+                        f"Convirtiendo {i+1}/{len(imgs)}: {img.name}",
+                        i / max(1, len(imgs)),
+                    )
+                    reporter.check()
+                    out = default_output_dir(img.parent)
+                    results.append(convert_one(img, out, target_ext="png"))
+                reporter.report("Conversión terminada", 1.0)
+                return results
+
+            res = await job.run(work, start_msg=f"Convirtiendo {len(imgs)} imágenes…")
+            if res is None:
+                return
+            ok = sum(1 for r in res if r.ok and not r.skipped)
+            sk = sum(1 for r in res if r.skipped)
+            msg = f"{ok} convertidas · {sk} omitidas"
+            job.status.set_text(msg)
+            ui.notify(msg, type="positive")
+
+        def copy_paths() -> None:
+            paths = _selected_paths()
+            if not paths:
+                ui.notify("Selecciona archivos", type="warning")
+                return
+            text = "\n".join(str(p) for p in paths)
+            try:
+                ui.clipboard.write(text)
+            except Exception:
+                # fallback: mostrar dialogo copiable
+                with ui.dialog() as d, ui.card().classes("fs-card p-4 max-w-lg"):
+                    ui.label("Copia las rutas:").classes("font-medium")
+                    ui.textarea(value=text).classes("w-full").props("readonly outlined")
+                    ui.button("Cerrar", on_click=d.close)
+                d.open()
+            ui.notify(f"{len(paths)} rutas", type="positive")
+
+        def export_list() -> None:
+            paths = _selected_paths() or [
+                Path(r["path"]) for r in state["results"]
+            ]
+            if not paths:
+                return
+            out = Path.home() / ".filesage" / "exports"
+            out.mkdir(parents=True, exist_ok=True)
+            dest = out / f"search_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            dest.write_text("\n".join(str(p) for p in paths), encoding="utf-8")
+            ui.notify(f"Exportado: {dest}", type="positive")
 
         async def do_search() -> None:
             root = Path(folder.path_value() or "").expanduser()
@@ -629,69 +989,102 @@ def page_search() -> None:
                 ui.notify("Escribe un texto de busqueda", type="warning")
                 return
             result_area.clear()
+            actions_row.clear()
+            bridge_row.clear()
             btn_run.set_enabled(False)
+            ext_f = (only_ext.value or "").strip().lower()
+            if ext_f and not ext_f.startswith("."):
+                ext_f = "." + ext_f
 
             def work(reporter):
                 reporter.report(f"Escaneando {root}…", 0.05)
                 scan = engine.scan(root, progress=reporter)
-                results = []
+                hits = []
                 total = max(1, len(scan.files))
                 for i, fi in enumerate(scan.files):
-                    if i % 40 == 0:
-                        reporter.report(f"Filtrando {i}/{total}…", 0.1 + 0.9 * (i / total))
-                    name = fi.path.name.lower()
-                    ext = fi.path.suffix.lower()
-                    path_s = str(fi.path).lower()
-                    meta_s = ""
+                    if reporter and i % 50 == 0:
+                        reporter.report(
+                            f"Filtrando {i}/{total}",
+                            0.1 + 0.85 * (i / total),
+                        )
+                        reporter.check()
                     what = ""
+                    mime = ""
                     if use_meta.value:
                         try:
                             ident = engine.identify_file(fi.path, deep=True)
                             what = ident.summary
-                            meta_s = (ident.summary + " " + ident.mime).lower()
+                            mime = ident.mime
                         except Exception:
                             pass
-                    if q in f"{name} {ext} {path_s} {meta_s}":
-                        results.append((fi, what))
-                results.sort(key=lambda x: x[0].size, reverse=True)
-                reporter.report("Busqueda lista", 1.0)
-                return results[:500]
+                    hit = match_file(
+                        path=fi.path,
+                        size=int(fi.size),
+                        root=root,
+                        query=q,
+                        what=what,
+                        mime=mime,
+                        use_path=bool(use_path.value),
+                        use_meta=bool(use_meta.value),
+                        ext_filter=ext_f,
+                    )
+                    if hit:
+                        hits.append(hit)
+                ranked = rank_hits(hits, limit=500)
+                results = [
+                    {
+                        "path": str(h.path),
+                        "name": h.name,
+                        "parent": h.parent,
+                        "size": h.size,
+                        "what": h.what,
+                        "why": h.match_why,
+                    }
+                    for h in ranked
+                ]
+                reporter.report(f"{len(results)} coincidencias", 1.0)
+                return results
 
             try:
                 results = await job.run(work, start_msg="Buscando…")
             except Exception:
                 btn_run.set_enabled(True)
-                with result_area:
-                    empty_state("Error en la busqueda", "Revisa la ruta.", icon="error")
                 return
             btn_run.set_enabled(True)
             if results is None:
-                with result_area:
-                    empty_state("Busqueda cancelada", "Puedes intentar de nuevo.", icon="cancel")
                 return
-            status_msg = f"{len(results)} coincidencias (max 500)"
-            job.finish(status_msg, notify=True)
             state["results"] = results
-            state["status"] = status_msg
+            state["checks"] = {r["path"]: False for r in results}
             state["query"] = q
+            status_msg = f"{len(results)} coincidencias (max 500)"
+            state["status"] = status_msg
             session_store.update_page_state(
                 "/search",
                 results=results,
+                checks=dict(state["checks"]),
                 status=status_msg,
                 query=q,
                 folder_path=str(root),
                 use_meta=bool(use_meta.value),
+                use_path=bool(use_path.value),
+                ext_filter=ext_f,
             )
+            job.status.set_text(status_msg)
+            ui.notify(status_msg, type="positive", position="top")
+            render()
+
+        if state["results"]:
+            render()
+            if state.get("status"):
+                job.status.set_text(state["status"])
+        else:
             with result_area:
-                if not results:
-                    empty_state("Sin resultados", f"Nada coincide con «{q}»", icon="search_off")
-                    return
-                rows = [{"archivo": fi.path.name, "ruta": str(fi.path.parent), "tamano": _fmt(fi.size), "que": what or ""} for fi, what in results]
-                ui.table(columns=[{"name": "archivo", "label": "Archivo", "field": "archivo"}, {"name": "ruta", "label": "Ruta", "field": "ruta"}, {"name": "tamano", "label": "Tamano", "field": "tamano"}, {"name": "que", "label": "Que es", "field": "que"}], rows=rows, row_key="ruta", pagination=25).classes("w-full")
-
+                empty_state(
+                    "Escribe un criterio y busca",
+                    "Ejemplos: .jpg · informe · setup.exe — luego actua o envia a otra herramienta.",
+                    icon="search",
+                )
         btn_run.on_click(do_search)
-
-
 
 
 @ui.page("/tools")
@@ -757,6 +1150,7 @@ def page_organize() -> None:
     }
 
     with page_frame("Organizar por tipo", active_path="/tools"):
+        selection_banner(tool="organize")
         section_title(
             "Organizar por tipo",
             "Clasifica archivos en FileSage_Organizado/Musica, Imagenes, Videos… "
@@ -1002,6 +1396,7 @@ def page_cleanup() -> None:
     }
 
     with page_frame("Limpieza profunda", active_path="/tools"):
+        selection_banner(tool="cleanup")
         section_title(
             "Limpieza profunda",
             "Carpetas vacias y archivos antiguos. Por defecto: papelera. "
@@ -1413,6 +1808,7 @@ def page_convert() -> None:
     state: dict = {"results": []}
 
     with page_frame("Convertir imagenes", active_path="/tools"):
+        selection_banner(tool="convert")
         section_title(
             "Convertidor de imagenes",
             "Detecta el formato de entrada y exporta al que elijas en una carpeta FileSage_converted.",
@@ -1436,9 +1832,10 @@ def page_convert() -> None:
             value="",
         ).classes("w-full max-w-2xl")
         ui.label(
-            "No se convierten archivos que ya tengan el formato elegido "
-            "ni los que estén dentro de FileSage_converted."
+            "Detecta el formato real (cabecera). Omite: mismo formato, "
+            "FileSage_converted, salidas ya existentes y nombres *_converted."
         ).classes("text-xs text-[#6b6b80] max-w-2xl")
+        force = ui.checkbox("Forzar sobrescritura si el destino ya existe", value=False)
         job = JobControls(page_route="")
         result_area = ui.column().classes("w-full gap-2")
         btn = ui.button("Convertir", icon="transform").props("color=primary unelevated")
@@ -1462,6 +1859,7 @@ def page_convert() -> None:
                     output_dir=dest,
                     quality=int(quality.value or 90),
                     recursive=bool(recursive.value),
+                    force=bool(force.value),
                 )
                 reporter.report(f"Listo: {len(res)} archivo(s)", 1.0)
                 return res

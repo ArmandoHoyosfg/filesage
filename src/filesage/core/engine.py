@@ -94,7 +94,45 @@ class Engine:
     def plan_trash_duplicates(self, groups: list[DuplicateGroup], *, keep_newest: bool = True) -> list[ActionRecord]:
         return self.action_manager.plan_trash_duplicates(groups, keep_newest=keep_newest)
 
-    def execute_actions(self, actions: Sequence[ActionRecord], *, dry_run: bool | None = None) -> Transaction:
+    def execute_actions_progressed(
+        self,
+        actions,
+        *,
+        dry_run: bool | None = None,
+        progress: ProgressReporter | None = None,
+    ):
+        """Ejecuta acciones una a una con progreso visible."""
+        from filesage.domain.models import Transaction
+        from datetime import datetime
+        from filesage.infrastructure.storage import new_transaction_id
+
+        if dry_run is None:
+            dry_run = self.settings.app.dry_run_default
+        total = max(1, len(actions))
+        executed = []
+        started = datetime.now()
+        for i, act in enumerate(actions):
+            if progress:
+                progress.report(
+                    f"{'Simulando' if dry_run else 'Ejecutando'} {i+1}/{len(actions)}: {Path(act.source).name}",
+                    i / total,
+                )
+                progress.check()
+            tx_one = self.action_manager.execute([act], dry_run=dry_run)
+            executed.extend(tx_one.actions)
+        if progress:
+            progress.report(f"Listo: {len(executed)} acciones", 1.0)
+        return Transaction(
+            transaction_id=new_transaction_id(),
+            started_at=started,
+            finished_at=datetime.now(),
+            actions=tuple(executed),
+            dry_run=bool(dry_run),
+            notes=f"{len(executed)} acciones",
+        )
+
+    def execute_actions(
+self, actions: Sequence[ActionRecord], *, dry_run: bool | None = None) -> Transaction:
         return self.action_manager.execute(actions, dry_run=dry_run)
 
     def list_transactions(self, limit: int = 50) -> list[Transaction]:
@@ -179,6 +217,7 @@ class Engine:
         output_dir: Path | None = None,
         quality: int = 90,
         recursive: bool = False,
+        force: bool = False,
     ):
         """Convierte imagenes a otro formato (Pillow)."""
         from filesage.services.image_converter import convert_path
@@ -188,6 +227,7 @@ class Engine:
             output_dir=output_dir,
             quality=quality,
             recursive=recursive,
+            force=force,
         )
 
     def find_empty_folders(self, root: Path, *, max_depth: int | None = None) -> list:

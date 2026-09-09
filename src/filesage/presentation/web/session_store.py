@@ -1,4 +1,4 @@
-"""Estado de sesion web: jobs globales + datos por seccion + busy UI."""
+"""Estado de sesion web: jobs globales + datos por seccion + seleccion compartida."""
 
 from __future__ import annotations
 
@@ -13,6 +13,13 @@ _job: dict[str, Any] = {
     "message": "",
     "fraction": None,
     "finished_notice": None,
+}
+
+# Seleccion compartida entre herramientas (rutas absolutas)
+_selection: dict[str, Any] = {
+    "paths": [],  # list[str]
+    "source": "",  # p.ej. "search"
+    "label": "",
 }
 
 _listeners: list[Callable[[], None]] = []
@@ -71,6 +78,45 @@ def consume_finished_notice() -> str | None:
     n = _job.get("finished_notice")
     _job["finished_notice"] = None
     return n
+
+
+def set_selection(
+    paths: list[str],
+    *,
+    source: str = "",
+    label: str = "",
+) -> None:
+    """Publica rutas para que otras herramientas las consuman."""
+    cleaned = []
+    seen: set[str] = set()
+    for p in paths:
+        s = str(p).strip()
+        if s and s not in seen:
+            seen.add(s)
+            cleaned.append(s)
+    _selection["paths"] = cleaned
+    _selection["source"] = source
+    _selection["label"] = label or f"{len(cleaned)} archivos"
+    _notify_listeners()
+
+
+def get_selection() -> dict[str, Any]:
+    return {
+        "paths": list(_selection.get("paths") or []),
+        "source": _selection.get("source") or "",
+        "label": _selection.get("label") or "",
+    }
+
+
+def clear_selection() -> None:
+    _selection["paths"] = []
+    _selection["source"] = ""
+    _selection["label"] = ""
+    _notify_listeners()
+
+
+def peek_selection_paths() -> list[str]:
+    return list(_selection.get("paths") or [])
 
 
 def add_listener(cb: Callable[[], None]) -> None:

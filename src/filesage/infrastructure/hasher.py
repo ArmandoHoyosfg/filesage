@@ -1,9 +1,10 @@
-"""Implementacion de hashing segura y eficiente (IHasher).
+"""Hashing seguro y eficiente (IHasher).
 
-Pipeline recomendado:
-1. Agrupar por tamano (hecho en DuplicateFinder)
-2. Hash parcial (primeros N KB) con xxhash
-3. Hash completo solo de candidatos
+Mejores practicas anti falso-positivo:
+- Hash parcial multi-region (inicio + medio + final), no solo los primeros KB
+  (dos MP3 distintos pueden compartir cabecera/silencio inicial).
+- Hash completo por chunks de todo el archivo.
+- xxhash64 por velocidad; SHA-256 disponible para modo estricto.
 """
 
 from __future__ import annotations
@@ -22,39 +23,83 @@ logger = logging.getLogger(__name__)
 
 
 class Hasher(IHasher):
-    """Hasher configurable (xxhash64 por defecto + SHA-256 opcional)."""
+    """Hasher configurable (xxhash64 por defecto)."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._partial_size = settings.hashing.partial_size_kb * 1024
+        self._partial_size = max(4 * 1024, settings.hashing.partial_size_kb * 1024)
         self._algo = settings.hashing.algorithm.lower()
 
+    def _new_hasher(self):
+        if self._algo in ("sha256", "sha-256"):
+            return hashlib.sha256()
+        return xxhash.xxh64()
+
     def partial_hash(self, path: Path) -> str:
-        """Hash rapido de los primeros N KB del archivo."""
+        """Fingerprint rapido: inicio + medio + final (si el archivo es grande).
+
+        Evita colisiones parciales tipicas en audio/video con cabeceras similares.
+        """
         try:
+            size = path.stat().st_size
+            h = self._new_hasher()
+            # Incluir tamano en el digest parcial reduce cruces entre archivos
+            h.update(size.to_bytes(8, "little", signed=False))
+
             with path.open("rb") as f:
-                data = f.read(self._partial_size)
-            if self._algo.startswith("xxhash"):
-                return xxhash.xxh64(data).hexdigest()
-            # fallback
-            return hashlib.sha256(data).hexdigest()
+                # Inicio
+                head = f.read(self._partial_size)
+                h.update(head)
+
+                if size > self._partial_size * 3:
+                    # Medio
+                    mid_pos = max(0, (size // 2) - (self._partial_size // 2))
+                    f.seek(mid_pos)
+                    h.update(f.read(self._partial_size))
+                    # Final
+                    tail_pos = max(0, size - self._partial_size)
+                    f.seek(tail_pos)
+                    h.update(f.read(self._partial_size))
+                elif size > self._partial_size:
+                    # Solo final si cabe
+                    f.seek(max(0, size - self._partial_size))
+                    h.update(f.read(self._partial_size))
+
+            return h.hexdigest()
         except OSError as exc:
             raise HashError(f"No se pudo leer {path}: {exc}") from exc
 
     def full_hash(self, path: Path) -> str:
-        """Hash completo del archivo (lectura por chunks)."""
+        """Hash de todo el contenido (por chunks)."""
         try:
-            if self._algo.startswith("xxhash"):
-                h = xxhash.xxh64()
-            else:
-                h = hashlib.sha256()
-
+            h = self._new_hasher()
             with path.open("rb") as f:
                 while True:
-                    chunk = f.read(1024 * 1024)  # 1 MB
+                    chunk = f.read(1024 * 1024)
                     if not chunk:
                         break
                     h.update(chunk)
             return h.hexdigest()
         except OSError as exc:
             raise HashError(f"No se pudo hashear {path}: {exc}") from exc
+
+    def verify_same_content(self, a: Path, b: Path, *, sample: int = 8192) -> bool:
+        """Comprobacion extra tras hash: compara bloques inicio/final.
+
+        No sustituye al hash completo; detecta fallos absurdos de I/O.
+        """
+        try:
+            sa, sb = a.stat().st_size, b.stat().st_size
+            if sa != sb:
+                return False
+            with a.open("rb") as fa, b.open("rb") as fb:
+                if fa.read(sample) != fb.read(sample):
+                    return False
+                if sa > sample * 2:
+                    fa.seek(sa - sample)
+                    fb.seek(sb - sample)
+                    if fa.read(sample) != fb.read(sample):
+                        return False
+            return True
+        except OSError:
+            return False
