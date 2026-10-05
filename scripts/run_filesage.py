@@ -48,6 +48,14 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def read_version(root: Path | None = None) -> str:
+    root = root or project_root()
+    vf = root / "VERSION"
+    if vf.exists():
+        return vf.read_text(encoding="utf-8").strip()
+    return "0.0.0"
+
+
 def fail(msg: str, code: int = 1) -> None:
     print(f"[FileSage] ERROR: {msg}", file=sys.stderr)
     sys.exit(code)
@@ -64,6 +72,7 @@ def check_python() -> None:
             f"Actual: {sys.version_info.major}.{sys.version_info.minor}"
         )
     info(f"Python OK: {sys.version.split()[0]}")
+    info(f"FileSage {read_version()}")
 
 
 def check_structure(root: Path) -> None:
@@ -105,6 +114,7 @@ def ensure_path(root: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Lanzador FileSage (sin empaquetar)")
+    p.add_argument("--menu", action="store_true", help="Abrir menu interactivo")
     p.add_argument("--gui", action="store_true", help="Abrir GUI Qt (default)")
     p.add_argument("--web", action="store_true", help="Abrir UI web en ventana nativa")
     p.add_argument("--browser", action="store_true", help="Forzar navegador en vez de ventana nativa")
@@ -125,6 +135,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if getattr(args, "menu", False):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "launcher_menu", project_root() / "scripts" / "launcher_menu.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(mod)
+        raise SystemExit(mod.menu_loop())
     root = project_root()
     check_python()
     check_structure(root)

@@ -3,7 +3,7 @@
 
 app:
   name: "FileSage"
-  version: "0.8.16"
+  version: "0.9.4"
   dry_run_default: true
 
 scan:
@@ -24,6 +24,7 @@ hashing:
   algorithm: "xxhash64"    # xxhash64 | sha256 | blake3
   partial_size_kb: 64      # tamaño del hash parcial
   full_hash_threshold_mb: 0  # 0 = siempre calcular full hash si pasa el filtro
+  use_cache: true          # reutilizar hashes si size+mtime no cambian
 
 duplicates:
   min_size_bytes: 1024     # ignorar archivos más pequeños

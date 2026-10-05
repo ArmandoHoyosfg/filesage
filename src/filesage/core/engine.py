@@ -91,8 +91,20 @@ class Engine:
     ) -> list[DuplicateGroup]:
         return self.duplicate_finder.find(scan_result.files, progress=progress)
 
-    def plan_trash_duplicates(self, groups: list[DuplicateGroup], *, keep_newest: bool = True) -> list[ActionRecord]:
-        return self.action_manager.plan_trash_duplicates(groups, keep_newest=keep_newest)
+    def plan_trash_duplicates(
+        self,
+        groups: list[DuplicateGroup],
+        *,
+        keep_newest: bool = True,
+        strategy: str | None = None,
+        prefer_path_substr: str | None = None,
+    ) -> list[ActionRecord]:
+        return self.action_manager.plan_trash_duplicates(
+            groups,
+            keep_newest=keep_newest,
+            strategy=strategy,
+            prefer_path_substr=prefer_path_substr,
+        )
 
     def execute_actions_progressed(
         self,

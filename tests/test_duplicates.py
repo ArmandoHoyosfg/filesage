@@ -90,7 +90,9 @@ def test_no_duplicates(tmp_path: Path):
 
 
 def test_hasher_partial_includes_regions(tmp_path: Path):
-    h = Hasher(Settings())
+    s = Settings()
+    s.hashing.use_cache = False
+    h = Hasher(s)
     p = tmp_path / "big.bin"
     data = bytearray(200_000)
     data[0:10] = b"STARTSTART"

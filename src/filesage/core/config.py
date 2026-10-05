@@ -23,7 +23,7 @@ USER_CONFIG_PATH = USER_CONFIG_DIR / "config.yaml"
 
 class AppConfig(BaseModel):
     name: str = "FileSage"
-    version: str = "0.8.16"
+    version: str = "0.9.4"
     dry_run_default: bool = True
 
 
@@ -49,6 +49,7 @@ class HashingConfig(BaseModel):
     algorithm: str = "xxhash64"
     partial_size_kb: int = 64
     full_hash_threshold_mb: int = 0
+    use_cache: bool = True
 
 
 class DuplicatesConfig(BaseModel):

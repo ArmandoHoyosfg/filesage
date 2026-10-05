@@ -1,3 +1,38 @@
+## [0.9.3] - 2026-09-28
+
+### Added
+- **FileSage.bat** / **FileSage.ps1** en la raiz (doble clic, sin comandos)
+- Menu interactivo `scripts/launcher_menu.py`
+- Archivo **VERSION** + `scripts/sync_version.py`
+- Documentacion `docs/LAUNCHER.md` y README orientado al launcher
+
+### Improved
+- run_filesage.py muestra version y soporta --menu
+
+## [0.9.2] - 2026-09-26
+
+### Added
+- Suite de integridad (`tests/integrity/` + `scripts/run_integrity.py`)
+  - Salud de codigo, rutas web, imports, flujos motor≈UI, contratos de sesion
+  - Regresion: Smart no debe usar state['results']
+
+## [0.9.1] - 2026-09-26
+
+### Fixed
+- KeyError results en Smart: codigo de Buscar se habia fusionado por error en page_smart
+
+## [0.9.0] - 2026-09-26
+
+### Added
+- Cache de hashes (path+size+mtime) para rescaneos mas rapidos (B1)
+- Estrategias al limpiar duplicados: newest / oldest / shortest_name / prefer_path (A4)
+- Vista previa con lista antes de enviar a papelera (A2)
+
+### Improved
+- Progreso en ejecucion de acciones (A1)
+- Historial: texto sobre que se puede deshacer (A3)
+- Ajuste: activar/desactivar cache de hashes
+
 # Changelog
 
 Todos los cambios relevantes de FileSage se documentan aqui.

@@ -24,6 +24,7 @@ from filesage.presentation.web.context import get_workspace
 from filesage.core.workspace_safety import assess_workspace
 from filesage.presentation.web.session_store import bind_busy_button
 from filesage.presentation.web.selection_ui import selection_banner
+from filesage.presentation.web.confirm_actions import confirm_trash_preview
 from filesage.services.file_search import match_file, rank_hits
 
 
@@ -211,6 +212,20 @@ def page_duplicates() -> None:
     with page_frame("Duplicados", active_path="/duplicates"):
         section_title("Duplicados", "Solo archivos con el MISMO contenido (hash completo). Mismo tamano no basta. Cancela si tarda.")
         selection_banner(tool="duplicates")
+        keep_strategy_sel = ui.select(
+            {
+                "newest": "Conservar el mas reciente",
+                "oldest": "Conservar el mas antiguo",
+                "shortest_name": "Conservar nombre mas corto",
+                "prefer_path": "Preferir ruta que contenga…",
+            },
+            value="newest",
+            label="Al limpiar, conservar",
+        ).classes("max-w-md")
+        prefer_path_in = ui.input(
+            "Subcadena de ruta preferida (si aplica)",
+            placeholder="ej. Originales o Backup",
+        ).classes("max-w-md")
         folder = folder_field(
             label="Carpeta",
             value=str(saved["root"]) if saved.get("root") else None,
@@ -226,11 +241,27 @@ def page_duplicates() -> None:
             if not groups:
                 ui.notify("Primero busca duplicados", type="warning")
                 return
-            plans = engine.plan_trash_duplicates(groups, keep_newest=True)
-            tx = await asyncio.to_thread(lambda: engine.execute_actions(plans, dry_run=True))
-            ui.notify(f"Dry-run OK · {len(plans)} archivos", type="positive", position="top")
+            plans = engine.plan_trash_duplicates(
+                groups,
+                strategy=str(keep_strategy_sel.value or "newest"),
+                prefer_path_substr=(prefer_path_in.value or "").strip() or None,
+            )
+            if not plans:
+                ui.notify("Nada que enviar (un solo archivo por grupo)", type="info")
+                return
+
+            def work(reporter):
+                return engine.execute_actions_progressed(
+                    plans, dry_run=True, progress=reporter
+                )
+
+            tx = await job.run(
+                work, start_msg=f"Simulando limpieza de {len(plans)}…"
+            )
+            if tx is None:
+                return
             job.status.set_text(
-                f"Simulacion: {len(plans)} irian a la papelera. Tx {tx.transaction_id}"
+                f"Simulacion: {len(plans)} irian a papelera · {tx.transaction_id[:8]}…"
             )
 
         async def clean_real() -> None:
@@ -238,35 +269,36 @@ def page_duplicates() -> None:
             if not groups:
                 ui.notify("Primero busca duplicados", type="warning")
                 return
-            plans = engine.plan_trash_duplicates(groups, keep_newest=True)
-            with ui.dialog() as dialog, ui.card().classes("fs-card p-4"):
-                ui.label("Confirmar limpieza real").classes("font-bold text-lg")
-                ui.label(
-                    f"Se enviaran {len(plans)} archivos a la PAPELERA.\n"
-                    "Se mantiene el mas reciente de cada grupo."
-                ).classes("whitespace-pre-wrap text-sm text-[#9898b0]")
-                with ui.row().classes("w-full justify-end gap-2 mt-2"):
-                    ui.button("Cancelar", on_click=dialog.close).props("flat")
+            plans = engine.plan_trash_duplicates(
+                groups,
+                strategy=str(keep_strategy_sel.value or "newest"),
+                prefer_path_substr=(prefer_path_in.value or "").strip() or None,
+            )
+            if not plans:
+                ui.notify("Nada que enviar", type="info")
+                return
+            paths = [a.source for a in plans]
 
-                    async def do_clean() -> None:
-                        dialog.close()
-                        def work(reporter):
-                            return engine.execute_actions_progressed(
-                                plans, dry_run=False, progress=reporter
-                            )
-                        tx = await job.run(
-                            work, start_msg=f"Enviando {len(plans)} a papelera…"
-                        )
-                        if tx is None:
-                            return
-                        ok = sum(1 for a in tx.actions if a.success)
-                        ui.notify(f"Limpieza: {ok}/{len(tx.actions)} OK", type="positive", position="top")
-                        state["groups"] = []
-                        session_store.update_page_state("/duplicates", groups=[], status="Limpieza terminada")
-                        _render_dup_results()
+            async def run_real() -> None:
+                def work(reporter):
+                    return engine.execute_actions_progressed(
+                        plans, dry_run=False, progress=reporter
+                    )
+                tx = await job.run(
+                    work, start_msg=f"Enviando {len(plans)} a papelera…"
+                )
+                if tx is None:
+                    return
+                ok = sum(1 for a in tx.actions if a.success)
+                job.status.set_text(f"Papelera: {ok}/{len(tx.actions)} OK")
+                ui.notify(f"{ok} archivos a la papelera", type="positive")
 
-                    ui.button("Confirmar", on_click=do_clean).props("color=negative")
-            dialog.open()
+            await confirm_trash_preview(
+                paths,
+                title="Confirmar limpieza de duplicados",
+                on_confirm=run_real,
+            )
+
 
         def export_dups(fmt: str) -> None:
             groups, root = state["groups"], state["root"]
@@ -503,6 +535,7 @@ def page_smart() -> None:
             render_items()
             _fill_actions()
 
+
         async def sim_plan() -> None:
             plan = state["plan"]
             if not plan:
@@ -512,9 +545,25 @@ def page_smart() -> None:
                 ui.notify("Selecciona al menos un archivo", type="warning")
                 return
             actions = engine.smart_plan_to_actions(plan)
-            tx = await asyncio.to_thread(lambda: engine.execute_actions(actions, dry_run=True))
-            ui.notify(f"Dry-run · {len(actions)} acciones", type="positive")
-            job.status.set_text(f"Simulacion OK · Tx {tx.transaction_id}")
+            if not actions:
+                ui.notify("No hay acciones que simular", type="info")
+                return
+
+            def _work_dry(reporter):
+                return engine.execute_actions_progressed(
+                    actions, dry_run=True, progress=reporter
+                )
+
+            tx = await job.run(
+                _work_dry, start_msg=f"Simulando {len(actions)} acciones…"
+            )
+            if tx is None:
+                return
+            ui.notify(
+                f"Dry-run OK · {len(actions)} acciones · {tx.transaction_id[:8]}…",
+                type="positive",
+            )
+            job.status.set_text(f"Simulacion OK · Tx {tx.transaction_id[:8]}…")
 
         async def run_plan() -> None:
             plan = state["plan"]
@@ -525,66 +574,74 @@ def page_smart() -> None:
                 ui.notify("Selecciona al menos un archivo", type="warning")
                 return
             actions = engine.smart_plan_to_actions(plan)
-            with ui.dialog() as dialog, ui.card().classes("fs-card p-4"):
-                ui.label(f"¿Enviar {len(actions)} archivos a la papelera?\nAprox. {_fmt(plan.selected_bytes)}").classes("whitespace-pre-wrap")
-                with ui.row().classes("justify-end gap-2"):
-                    ui.button("Cancelar", on_click=dialog.close).props("flat")
+            if not actions:
+                ui.notify("No hay acciones", type="info")
+                return
+            paths = [a.source for a in actions]
 
-                    async def confirm() -> None:
-                        dialog.close()
-                        tx = await asyncio.to_thread(lambda: engine.execute_actions(actions, dry_run=False))
-                        ok = sum(1 for a in tx.actions if a.success)
-                        ui.notify(f"{ok}/{len(tx.actions)} OK", type="positive")
-                        job.status.set_text(f"Ejecutado · Tx {tx.transaction_id}")
+            async def run_real() -> None:
+                def _work_real(reporter):
+                    return engine.execute_actions_progressed(
+                        actions, dry_run=False, progress=reporter
+                    )
 
-                    ui.button("Confirmar", on_click=confirm).props("color=negative")
-            dialog.open()
+                tx = await job.run(
+                    _work_real, start_msg=f"Ejecutando {len(actions)} acciones…"
+                )
+                if tx is None:
+                    return
+                ok = sum(1 for a in tx.actions if a.success)
+                job.status.set_text(f"Listo {ok}/{len(tx.actions)}")
+                ui.notify(f"{ok}/{len(tx.actions)} completadas", type="positive")
+
+            await confirm_trash_preview(
+                paths,
+                title="Confirmar plan Smart",
+                on_confirm=run_real,
+            )
 
         def _fill_actions() -> None:
             actions_row.clear()
             with actions_row:
-                ui.button("Simular plan", on_click=sim_plan, icon="science").props(
+                ui.button("Simular seleccion", on_click=sim_plan, icon="science").props(
                     "outline color=primary"
                 )
                 ui.button(
-                    "Ejecutar (papelera)", on_click=run_plan, icon="delete"
+                    "Ejecutar seleccion", on_click=run_plan, icon="play_arrow"
                 ).props("color=negative unelevated")
 
         if state.get("plan"):
             render_items()
             _fill_actions()
-            st = state.get("status") or session_store.get_page_state("/smart").get("status")
-            if st:
-                job.status.set_text(st)
-            _update_summary()
+            if state.get("status"):
+                job.status.set_text(state["status"])
+                summary.set_text(state["status"])
         else:
             with table_host:
                 empty_state(
-                    "Genera un plan para ver candidatos",
-                    "Los resultados se conservan al cambiar de seccion.",
+                    "Genera un plan",
+                    "Analiza la carpeta y te propondremos candidatos seguros.",
                     icon="auto_awesome",
                 )
         btn_run.on_click(build)
 
 
-
 @ui.page("/search")
 def page_search() -> None:
-    """Busqueda + acciones + puente hacia otras herramientas."""
+    """Busqueda + acciones in-situ + puente a otras herramientas."""
     from datetime import datetime
 
-    from filesage.domain.models import ActionRecord, ActionType, FileInfo
+    from filesage.domain.models import ActionRecord, ActionType
     from filesage.infrastructure.storage import new_action_id
 
     engine = get_engine()
     saved = session_store.get_page_state("/search")
     state: dict = {
-        "results": list(saved.get("results") or []),  # list[tuple path_str, size, what]
+        "results": list(saved.get("results") or []),
         "checks": dict(saved.get("checks") or {}),
         "status": saved.get("status", ""),
         "query": saved.get("query", ""),
     }
-    # Normalizar resultados antiguos (fi, what) → serializables
     norm_results: list[dict] = []
     for item in state["results"]:
         if isinstance(item, dict):
@@ -676,17 +733,17 @@ def page_search() -> None:
                 if not state["results"]:
                     empty_state(
                         "Escribe un criterio y busca",
-                        "Luego podras actuar sobre la seleccion o enviarla a otra herramienta.",
+                        "Luego podras actuar sobre la seleccion o enviar a otra herramienta.",
                         icon="search",
                     )
                     return
                 with ui.row().classes("gap-2 mb-2 flex-wrap"):
-                    ui.button("Seleccionar todos", on_click=lambda: select_all(True)).props(
-                        "outline dense"
-                    )
-                    ui.button("Quitar seleccion", on_click=lambda: select_all(False)).props(
-                        "outline dense"
-                    )
+                    ui.button(
+                        "Seleccionar todos", on_click=lambda: select_all(True)
+                    ).props("outline dense")
+                    ui.button(
+                        "Quitar seleccion", on_click=lambda: select_all(False)
+                    ).props("outline dense")
                 for row in state["results"][:400]:
                     p = str(row["path"])
                     if p not in state["checks"]:
@@ -719,7 +776,7 @@ def page_search() -> None:
                             )
             _update_summary()
             with actions_row:
-                ui.label("Acciones sobre la selección (aquí mismo)").classes(
+                ui.label("Acciones sobre la seleccion (aqui mismo)").classes(
                     "text-xs text-[#9898b0] w-full"
                 )
                 ui.button(
@@ -733,33 +790,44 @@ def page_search() -> None:
                     icon="delete",
                 ).props("color=negative unelevated")
                 ui.button(
-                    "Buscar duplicados entre selección",
+                    "Buscar duplicados entre seleccion",
                     on_click=dups_in_selection,
                     icon="content_copy",
                 ).props("outline color=primary")
                 ui.button(
-                    "Convertir imágenes seleccionadas",
+                    "Convertir imagenes seleccionadas",
                     on_click=convert_selected,
                     icon="transform",
                 ).props("outline color=primary")
-                ui.button("Copiar rutas", on_click=copy_paths, icon="content_copy").props(
-                    "outline"
-                )
-                ui.button("Exportar lista", on_click=export_list, icon="download").props(
-                    "outline"
-                )
+                ui.button(
+                    "Copiar rutas", on_click=copy_paths, icon="content_copy"
+                ).props("outline")
+                ui.button(
+                    "Exportar lista", on_click=export_list, icon="download"
+                ).props("outline")
             with bridge_row:
-                with ui.expansion("Opciones avanzadas: abrir otra sección", icon="open_in_new").classes(
-                    "w-full max-w-2xl"
-                ):
+                with ui.expansion(
+                    "Opciones avanzadas: abrir otra seccion", icon="open_in_new"
+                ).classes("w-full max-w-2xl"):
                     ui.label(
                         "Solo si prefieres el flujo completo de esa herramienta."
                     ).classes("text-xs text-[#9898b0] mb-2")
                     with ui.row().classes("gap-2 flex-wrap"):
-                        ui.button("Duplicados", on_click=lambda: send_to("/duplicates", "duplicates")).props("flat dense")
-                        ui.button("Smart", on_click=lambda: send_to("/smart", "smart")).props("flat dense")
-                        ui.button("Organizar", on_click=lambda: send_to("/tools/organize", "organize")).props("flat dense")
-                        ui.button("Limpieza", on_click=lambda: send_to("/tools/cleanup", "cleanup")).props("flat dense")
+                        ui.button(
+                            "Duplicados",
+                            on_click=lambda: send_to("/duplicates", "duplicates"),
+                        ).props("flat dense")
+                        ui.button(
+                            "Smart", on_click=lambda: send_to("/smart", "smart")
+                        ).props("flat dense")
+                        ui.button(
+                            "Organizar",
+                            on_click=lambda: send_to("/tools/organize", "organize"),
+                        ).props("flat dense")
+                        ui.button(
+                            "Limpieza",
+                            on_click=lambda: send_to("/tools/cleanup", "cleanup"),
+                        ).props("flat dense")
 
         def publish_selection() -> list[str]:
             paths = [str(p) for p in _selected_paths()]
@@ -775,7 +843,6 @@ def page_search() -> None:
             paths = publish_selection()
             if not paths:
                 return
-            # Sugerir carpeta comun si todas comparten padre
             parents = {str(Path(p).parent) for p in paths}
             if len(parents) == 1:
                 common = next(iter(parents))
@@ -786,7 +853,7 @@ def page_search() -> None:
                     selection_hint=f"{len(paths)} desde Buscar",
                 )
             ui.notify(
-                f"{len(paths)} archivos listos para {kind}. Abriendo herramienta…",
+                f"{len(paths)} archivos listos para {kind}. Abriendo…",
                 type="positive",
             )
             ui.navigate.to(route)
@@ -832,7 +899,8 @@ def page_search() -> None:
                     return
                 ok = sum(1 for a in tx.actions if a.success)
                 msg = (
-                    f"{'Simulación' if dry_run else 'Papelera'}: {ok}/{len(tx.actions)} OK"
+                    f"{'Simulacion' if dry_run else 'Papelera'}: "
+                    f"{ok}/{len(tx.actions)} OK"
                 )
                 job.status.set_text(msg)
                 ui.notify(msg, type="positive", position="top")
@@ -851,24 +919,11 @@ def page_search() -> None:
                 await run_batch(True)
                 return
 
-            with ui.dialog() as dialog, ui.card().classes("fs-card p-4 max-w-md"):
-                ui.label("Enviar a papelera").classes("font-bold")
-                ui.label(
-                    f"{len(paths)} archivos. Verás el progreso abajo. Escribe OK."
-                ).classes("text-sm text-[#9898b0]")
-                conf = ui.input("Confirmacion").classes("w-full")
-                with ui.row().classes("justify-end gap-2"):
-                    ui.button("Cancelar", on_click=dialog.close).props("flat")
-
-                    async def go() -> None:
-                        if (conf.value or "").strip().upper() != "OK":
-                            ui.notify("Escribe OK", type="warning")
-                            return
-                        dialog.close()
-                        await run_batch(False)
-
-                    ui.button("Confirmar", on_click=go).props("color=negative")
-            dialog.open()
+            await confirm_trash_preview(
+                paths,
+                title="Enviar a papelera",
+                on_confirm=lambda: run_batch(False),
+            )
 
         async def dups_in_selection() -> None:
             paths = _selected_paths()
@@ -878,41 +933,39 @@ def page_search() -> None:
 
             def work(reporter):
                 from filesage.domain.models import FileInfo
-                import os
+
                 files = []
-                for p in paths:
+                for pth in paths:
                     try:
-                        st = p.stat()
+                        st = pth.stat()
                         files.append(
                             FileInfo(
-                                path=p,
+                                path=pth,
                                 size=st.st_size,
                                 mtime=st.st_mtime,
-                                is_symlink=p.is_symlink(),
+                                is_symlink=pth.is_symlink(),
                             )
                         )
                     except OSError:
                         continue
                 reporter.report(f"Comparando {len(files)} archivos…", 0.1)
-                groups = engine.duplicate_finder.find(files, progress=reporter)
-                return groups
+                return engine.duplicate_finder.find(files, progress=reporter)
 
             groups = await job.run(
-                work, start_msg="Buscando duplicados en la selección…"
+                work, start_msg="Buscando duplicados en la seleccion…"
             )
             if groups is None:
                 return
             if not groups:
-                ui.notify("No hay duplicados exactos en la selección", type="info")
-                job.status.set_text("Sin duplicados en la selección")
+                ui.notify("No hay duplicados exactos en la seleccion", type="info")
+                job.status.set_text("Sin duplicados en la seleccion")
                 return
             wasted = sum(g.wasted_size for g in groups)
             msg = f"{len(groups)} grupos · {_fmt(wasted)} recuperables"
             job.status.set_text(msg)
             ui.notify(msg, type="positive")
-            # Mostrar resumen en expansion
             with result_area:
-                ui.label(f"Duplicados en selección: {msg}").classes(
+                ui.label(f"Duplicados en seleccion: {msg}").classes(
                     "font-semibold text-primary mt-2"
                 )
                 for i, g in enumerate(groups[:20], 1):
@@ -921,14 +974,27 @@ def page_search() -> None:
 
         async def convert_selected() -> None:
             paths = _selected_paths()
-            img_ext = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+            img_ext = {
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".webp",
+                ".bmp",
+                ".gif",
+                ".tif",
+                ".tiff",
+            }
             imgs = [p for p in paths if p.suffix.lower() in img_ext]
             if not imgs:
-                ui.notify("No hay imágenes en la selección", type="warning")
+                ui.notify("No hay imagenes en la seleccion", type="warning")
                 return
 
             def work(reporter):
-                from filesage.services.image_converter import convert_one, default_output_dir
+                from filesage.services.image_converter import (
+                    convert_one,
+                    default_output_dir,
+                )
+
                 results = []
                 for i, img in enumerate(imgs):
                     reporter.report(
@@ -938,10 +1004,12 @@ def page_search() -> None:
                     reporter.check()
                     out = default_output_dir(img.parent)
                     results.append(convert_one(img, out, target_ext="png"))
-                reporter.report("Conversión terminada", 1.0)
+                reporter.report("Conversion terminada", 1.0)
                 return results
 
-            res = await job.run(work, start_msg=f"Convirtiendo {len(imgs)} imágenes…")
+            res = await job.run(
+                work, start_msg=f"Convirtiendo {len(imgs)} imagenes…"
+            )
             if res is None:
                 return
             ok = sum(1 for r in res if r.ok and not r.skipped)
@@ -959,18 +1027,17 @@ def page_search() -> None:
             try:
                 ui.clipboard.write(text)
             except Exception:
-                # fallback: mostrar dialogo copiable
                 with ui.dialog() as d, ui.card().classes("fs-card p-4 max-w-lg"):
                     ui.label("Copia las rutas:").classes("font-medium")
-                    ui.textarea(value=text).classes("w-full").props("readonly outlined")
+                    ui.textarea(value=text).classes("w-full").props(
+                        "readonly outlined"
+                    )
                     ui.button("Cerrar", on_click=d.close)
                 d.open()
             ui.notify(f"{len(paths)} rutas", type="positive")
 
         def export_list() -> None:
-            paths = _selected_paths() or [
-                Path(r["path"]) for r in state["results"]
-            ]
+            paths = _selected_paths() or [Path(r["path"]) for r in state["results"]]
             if not paths:
                 return
             out = Path.home() / ".filesage" / "exports"
@@ -1081,10 +1148,11 @@ def page_search() -> None:
             with result_area:
                 empty_state(
                     "Escribe un criterio y busca",
-                    "Ejemplos: .jpg · informe · setup.exe — luego actua o envia a otra herramienta.",
+                    "Ejemplos: .jpg · informe · setup.exe — luego actua.",
                     icon="search",
                 )
         btn_run.on_click(do_search)
+
 
 
 @ui.page("/tools")
@@ -1312,11 +1380,17 @@ def page_organize() -> None:
                 ui.notify("Selecciona al menos un archivo", type="warning")
                 return
             actions = engine.organize_plan_to_actions(plan)
-            tx = await asyncio.to_thread(
-                lambda: engine.execute_actions(actions, dry_run=True)
+            def _work_dry(reporter):
+                return engine.execute_actions_progressed(
+                    actions, dry_run=True, progress=reporter
+                )
+            tx = await job.run(
+                _work_dry, start_msg=f"Simulando {len(actions)} acciones…"
             )
+            if tx is None:
+                return
             ui.notify(
-                f"Dry-run OK · {len(actions)} movimientos simulados · {tx.transaction_id[:8]}…",
+                f"Dry-run OK · {len(actions)} acciones · {tx.transaction_id[:8]}…",
                 type="positive",
             )
             job.status.set_text(f"Simulacion: {len(actions)} se moverian")
@@ -1343,9 +1417,15 @@ def page_organize() -> None:
 
                     async def confirm() -> None:
                         dialog.close()
-                        tx = await asyncio.to_thread(
-                            lambda: engine.execute_actions(actions, dry_run=False)
+                        def _work_real(reporter):
+                            return engine.execute_actions_progressed(
+                                actions, dry_run=False, progress=reporter
+                            )
+                        tx = await job.run(
+                            _work_real, start_msg=f"Ejecutando {len(actions)} acciones…"
                         )
+                        if tx is None:
+                            return
                         ok = sum(1 for a in tx.actions if a.success)
                         ui.notify(f"Movidos {ok}/{len(tx.actions)}", type="positive")
                         job.status.set_text(
@@ -1564,14 +1644,19 @@ def page_cleanup() -> None:
                 return
             actions = engine.cleanup_plan_to_actions(plan, permanent=permanent)
             if dry:
-                tx = await asyncio.to_thread(
-                    lambda: engine.execute_actions(actions, dry_run=True)
+                def _work_dry(reporter):
+                    return engine.execute_actions_progressed(
+                        actions, dry_run=True, progress=reporter
+                    )
+                tx = await job.run(
+                    _work_dry, start_msg=f"Simulando {len(actions)} acciones…"
                 )
+                if tx is None:
+                    return
                 ui.notify(
                     f"Dry-run OK · {len(actions)} acciones · {tx.transaction_id[:8]}…",
                     type="positive",
                 )
-                return
 
             title = "Borrado DEFINITIVO" if permanent else "Enviar a papelera"
             warn = (
@@ -1596,9 +1681,15 @@ def page_cleanup() -> None:
                             ui.notify(f"Debes escribir {need}", type="warning")
                             return
                         dialog.close()
-                        tx = await asyncio.to_thread(
-                            lambda: engine.execute_actions(actions, dry_run=False)
+                        def _work_real(reporter):
+                            return engine.execute_actions_progressed(
+                                actions, dry_run=False, progress=reporter
+                            )
+                        tx = await job.run(
+                            _work_real, start_msg=f"Ejecutando {len(actions)} acciones…"
                         )
+                        if tx is None:
+                            return
                         ok = sum(1 for a in tx.actions if a.success)
                         ui.notify(f"{ok}/{len(tx.actions)} completados", type="positive")
                         job.status.set_text(f"Listo {ok}/{len(tx.actions)}")
@@ -2105,14 +2196,19 @@ def page_empty_folders() -> None:
                 return
             actions = _to_actions(permanent)
             if dry:
-                tx = await asyncio.to_thread(
-                    lambda: engine.execute_actions(actions, dry_run=True)
+                def _work_dry(reporter):
+                    return engine.execute_actions_progressed(
+                        actions, dry_run=True, progress=reporter
+                    )
+                tx = await job.run(
+                    _work_dry, start_msg=f"Simulando {len(actions)} acciones…"
                 )
+                if tx is None:
+                    return
                 ui.notify(
-                    f"Dry-run OK · {len(actions)} carpetas · {tx.transaction_id[:8]}…",
+                    f"Dry-run OK · {len(actions)} acciones · {tx.transaction_id[:8]}…",
                     type="positive",
                 )
-                return
 
             title = "Borrado DEFINITIVO" if permanent else "Enviar a papelera"
             warn = (
@@ -2137,9 +2233,15 @@ def page_empty_folders() -> None:
                             ui.notify(f"Debes escribir {need}", type="warning")
                             return
                         dialog.close()
-                        tx = await asyncio.to_thread(
-                            lambda: engine.execute_actions(actions, dry_run=False)
+                        def _work_real(reporter):
+                            return engine.execute_actions_progressed(
+                                actions, dry_run=False, progress=reporter
+                            )
+                        tx = await job.run(
+                            _work_real, start_msg=f"Ejecutando {len(actions)} acciones…"
                         )
+                        if tx is None:
+                            return
                         ok = sum(1 for a in tx.actions if a.success)
                         ui.notify(f"{ok}/{len(tx.actions)} completadas", type="positive")
                         job.status.set_text(f"Listo {ok}/{len(tx.actions)}")
@@ -2277,7 +2379,11 @@ def page_history() -> None:
                         ).props("outline dense")
 
     with page_frame("Historial", active_path="/history"):
-        section_title("Historial", "Registro de simulaciones y acciones reales.")
+        section_title(
+            "Historial",
+            "Registro de acciones. Rollback automatico solo para MOVE/COPY; "
+            "TRASH/DELETE se recuperan desde la papelera del sistema.",
+        )
         ui.button("Actualizar", on_click=refresh, icon="refresh").props("color=primary unelevated")
         status
         host
@@ -2296,6 +2402,10 @@ def page_settings() -> None:
         step=256,
     ).classes("max-w-xs")
     ignore_hidden = ui.switch("Ignorar ocultos al escanear", value=s.scan.ignore_hidden)
+    use_hash_cache = ui.switch(
+        "Cache de hashes (rescaneos mas rapidos)",
+        value=getattr(s.hashing, "use_cache", True),
+    )
     reco = ui.switch(
         "Exclusiones recomendadas (AppData, .git, node_modules…)",
         value=getattr(s.scan, "use_recommended_excludes", True),
@@ -2311,6 +2421,7 @@ def page_settings() -> None:
         s.duplicates.min_size_bytes = int(min_size.value or 0)
         s.scan.ignore_hidden = bool(ignore_hidden.value)
         s.scan.use_recommended_excludes = bool(reco.value)
+        s.hashing.use_cache = bool(use_hash_cache.value)
         try:
             persist_settings(s)
             status.set_text("Guardado. Engine reiniciado.")

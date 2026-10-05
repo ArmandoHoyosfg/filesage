@@ -188,15 +188,42 @@ class ActionManager(IActionExecutor):
         groups: list,
         *,
         keep_newest: bool = True,
+        strategy: str | None = None,
+        prefer_path_substr: str | None = None,
     ) -> list[ActionRecord]:
-        """Genera un plan de acciones TRASH para duplicados (mantiene 1 por grupo)."""
+        """Genera plan TRASH para duplicados (mantiene 1 por grupo).
+
+        strategy:
+          - newest (default si keep_newest)
+          - oldest
+          - shortest_name
+          - prefer_path (prefer_path_substr en la ruta)
+        """
+        if strategy is None:
+            strategy = "newest" if keep_newest else "oldest"
+        strategy = (strategy or "newest").lower().strip()
+
         plans: list[ActionRecord] = []
         for group in groups:
             files = list(group.files)
             if len(files) < 2:
                 continue
-            # Ya vienen ordenados por mtime desc en DuplicateFinder
-            keep = files[0] if keep_newest else files[-1]
+
+            def _key(fi):
+                p = fi.path
+                if strategy == "oldest":
+                    return (fi.mtime, str(p))
+                if strategy == "shortest_name":
+                    return (len(p.name), str(p).lower())
+                if strategy == "prefer_path" and prefer_path_substr:
+                    sub = prefer_path_substr.lower()
+                    in_pref = 0 if sub in str(p).lower() else 1
+                    return (in_pref, -fi.mtime, str(p))
+                # newest
+                return (-fi.mtime, str(p))
+
+            ordered = sorted(files, key=_key)
+            keep = ordered[0]
             for fi in files:
                 if fi.path == keep.path:
                     continue
@@ -210,7 +237,11 @@ class ActionManager(IActionExecutor):
                         success=False,
                         message="",
                         dry_run=True,
-                        metadata={"group_hash": group.hash_full, "kept": str(keep.path)},
+                        metadata={
+                            "group_hash": group.hash_full,
+                            "kept": str(keep.path),
+                            "strategy": strategy,
+                        },
                     )
                 )
         return plans
