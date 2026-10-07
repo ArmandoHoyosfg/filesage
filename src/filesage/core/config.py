@@ -21,9 +21,35 @@ USER_CONFIG_DIR = Path.home() / ".filesage"
 USER_CONFIG_PATH = USER_CONFIG_DIR / "config.yaml"
 
 
+def package_version() -> str:
+    """Version del paquete (VERSION / __version__), no la del YAML de usuario."""
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[3] / "VERSION",  # repo root from src/filesage/core/
+        here.parents[2] / "VERSION",
+        Path.cwd() / "VERSION",
+    ]
+    for c in candidates:
+        try:
+            if c.is_file():
+                v = c.read_text(encoding="utf-8").strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+    try:
+        from filesage import __version__ as v  # type: ignore
+
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    return "0.9.9"
+
+
 class AppConfig(BaseModel):
     name: str = "FileSage"
-    version: str = "0.9.4"
+    version: str = Field(default_factory=lambda: package_version())
     dry_run_default: bool = True
 
 
@@ -95,10 +121,14 @@ class Settings(BaseSettings):
     def from_yaml(cls, path: Path | str) -> "Settings":
         path = Path(path).expanduser()
         if not path.exists():
-            return cls()
+            s = cls()
+            s.app.version = package_version()
+            return s
         with path.open("r", encoding="utf-8") as f:
             data: dict[str, Any] = yaml.safe_load(f) or {}
-        return cls(**data)
+        s = cls(**data)
+        s.app.version = package_version()
+        return s
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -119,11 +149,15 @@ def get_user_config_path() -> Path:
 def load_settings(config_path: Path | str | None = None) -> Settings:
     """Orden: ruta explicita → ~/.filesage/config.yaml → default del proyecto → codigo."""
     if config_path is not None:
-        return Settings.from_yaml(config_path)
+        s = Settings.from_yaml(config_path)
+        s.app.version = package_version()
+        return s
 
     if USER_CONFIG_PATH.exists():
         logger.debug("Cargando config de usuario: %s", USER_CONFIG_PATH)
-        return Settings.from_yaml(USER_CONFIG_PATH)
+        s = Settings.from_yaml(USER_CONFIG_PATH)
+        s.app.version = package_version()
+        return s
 
     candidates = [
         Path("config/default.yaml"),
@@ -132,9 +166,13 @@ def load_settings(config_path: Path | str | None = None) -> Settings:
     for candidate in candidates:
         if candidate.exists():
             logger.debug("Cargando config por defecto: %s", candidate)
-            return Settings.from_yaml(candidate)
+            s = Settings.from_yaml(candidate)
+            s.app.version = package_version()
+            return s
 
-    return Settings()
+    s = Settings()
+    s.app.version = package_version()
+    return s
 
 
 def save_settings(settings: Settings, path: Path | str | None = None) -> Path:
@@ -142,6 +180,8 @@ def save_settings(settings: Settings, path: Path | str | None = None) -> Path:
     dest = Path(path).expanduser() if path else USER_CONFIG_PATH
     dest.parent.mkdir(parents=True, exist_ok=True)
     data = settings.to_dict()
+    # No congelar una version vieja en el YAML de usuario
+    data.setdefault("app", {})["version"] = package_version()
     with dest.open("w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     logger.info("Configuracion guardada en %s", dest)

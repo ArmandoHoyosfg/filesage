@@ -91,7 +91,80 @@ class Engine:
     ) -> list[DuplicateGroup]:
         return self.duplicate_finder.find(scan_result.files, progress=progress)
 
+    def find_similar_images(
+        self,
+        root: Path,
+        *,
+        threshold: int = 12,
+        progress: ProgressReporter | None = None,
+    ):
+        """Imagenes visualmente similares (perceptual hash). Modo distinto a duplicados exactos."""
+        from filesage.services.similar_images import find_similar_images as _find
+
+        scan = self.scan(root, progress=progress)
+        if progress:
+            progress.report("Calculando hashes perceptuales…", 0.35)
+        return scan, _find(
+            scan.files, threshold=threshold, progress=progress
+        )
+
+    def plan_trash_similar_images(self, groups, *, keep_largest: bool = True):
+        """TRASH todas menos una por grupo (la mas grande por defecto)."""
+        from filesage.domain.models import ActionRecord, ActionType
+        from filesage.infrastructure.storage import new_action_id
+        from datetime import datetime
+
+        plans = []
+        for g in groups:
+            files = list(g.files)
+            if len(files) < 2:
+                continue
+            files_sorted = sorted(files, key=lambda f: (-f.size, str(f.path)))
+            keep = files_sorted[0] if keep_largest else files_sorted[-1]
+            for fi in files:
+                if fi.path == keep.path:
+                    continue
+                plans.append(
+                    ActionRecord(
+                        action_id=new_action_id(),
+                        action_type=ActionType.TRASH,
+                        source=fi.path,
+                        destination=None,
+                        timestamp=datetime.now(),
+                        success=False,
+                        message="",
+                        dry_run=True,
+                        metadata={
+                            "kind": "similar_image",
+                            "kept": str(keep.path),
+                            "distance": getattr(g, "max_distance", None),
+                        },
+                    )
+                )
+        return plans
+
+    def plan_transfer(
+        self,
+        sources: Sequence[Path] | list,
+        dest_dir: Path,
+        *,
+        mode: str = "copy",
+        on_conflict: str = "rename",
+        expand_dir_contents: bool = True,
+    ) -> list[ActionRecord]:
+        """Plan COPY/MOVE. Por defecto expande el contenido de carpetas/unidades."""
+        from filesage.services.transfer import plan_transfer as _plan
+
+        return _plan(
+            [Path(p) for p in sources],
+            Path(dest_dir),
+            mode=mode,
+            on_conflict=on_conflict,
+            expand_dir_contents=expand_dir_contents,
+        )
+
     def plan_trash_duplicates(
+
         self,
         groups: list[DuplicateGroup],
         *,
@@ -130,8 +203,45 @@ class Engine:
                     i / total,
                 )
                 progress.check()
-            tx_one = self.action_manager.execute([act], dry_run=dry_run)
-            executed.extend(tx_one.actions)
+            # Una a una con progreso interno (carpetas grandes)
+            if hasattr(self.action_manager, "_run_one"):
+                from filesage.application.progress import ProgressReporter
+                from filesage.domain.exceptions import CancelledError
+
+                class _Sub:
+                    def __init__(self, parent, base, span):
+                        self._p = parent
+                        self._base = base
+                        self._span = span
+
+                    def report(self, msg, frac=None):
+                        if frac is None:
+                            self._p.report(msg, self._base)
+                        else:
+                            self._p.report(msg, self._base + self._span * float(frac))
+
+                    def check(self):
+                        self._p.check()
+
+                sub = _Sub(progress, i / total, 1 / total) if progress else None
+                try:
+                    rec = self.action_manager._run_one(
+                        act, dry_run=bool(dry_run), progress=sub
+                    )
+                    executed.append(rec)
+                except Exception as exc:
+                    from filesage.domain.exceptions import CancelledError
+                    if isinstance(exc, CancelledError):
+                        if progress:
+                            progress.report(
+                                f"Cancelado tras {len(executed)} acciones",
+                                len(executed) / total,
+                            )
+                        break
+                    raise
+            else:
+                tx_one = self.action_manager.execute([act], dry_run=dry_run)
+                executed.extend(tx_one.actions)
         if progress:
             progress.report(f"Listo: {len(executed)} acciones", 1.0)
         return Transaction(

@@ -1,3 +1,62 @@
+## [0.9.13] - 2026-10-06
+
+### Fixed
+- Connection lost: progreso ya no notifica UI desde hilos de trabajo
+- Stall 20s / timeout 90s → omite archivo y sigue; resumen de incompletos al final
+- Errores de job no tumban el servidor NiceGUI
+
+## [0.9.12] - 2026-10-06
+
+### Fixed
+- Copia por bloques (1 MB) con timeout 90s por archivo y cancelacion real
+- Archivos colgados se omiten y se continua; cancelar ya no espera el archivo entero
+
+## [0.9.11] - 2026-10-06
+
+### Added
+- Diagnostico de disco/USB (`/tools/disk`)
+- Copia de carpetas con progreso por archivo (ya no se queda al 0%)
+
+## [0.9.10] - 2026-10-06
+
+### Fixed
+- Version de UI siempre desde archivo VERSION (ya no se queda en 0.8.16 del config de usuario)
+- Ventana nativa maximizada / centrada al iniciar
+
+## [0.9.9] - 2026-10-06
+
+### Fixed
+- Copiar/Mover desde unidad o carpeta: expande el contenido al destino
+- Con omitir, salta lo que ya existe
+
+## [0.9.8] - 2026-10-06
+
+### Fixed
+- Copiar/Mover: el origen del selector se incluye al preparar plan (ya no exige el paso extra)
+- Mensajes claros si la ruta no existe; normalizacion de unidades Windows (`F:` → `F:\`)
+
+### Improved
+- UI de transfer: secciones Origen / Destino; carpetas completas etiquetadas en el plan
+
+## [0.9.7] - 2026-10-06
+
+### Added
+- **Copiar / Mover** (`/tools/transfer`): plan, dry-run, conflictos rename/skip/overwrite
+- Integracion con seleccion de Buscar e Historial (MOVE reversible)
+
+## [0.9.6] - 2026-09-28
+
+### Added
+- **Fase D Buscar**: filtros (tamano, fecha, solo imagenes, excluir FileSage_*)
+- Sugerencias contextuales tras la busqueda
+- Presets de busqueda persistidos en ~/.filesage/search_presets.json
+
+## [0.9.5] - 2026-09-28
+
+### Added
+- **B2 Imagenes similares** (dHash + Hamming): Herramientas → Imagenes similares
+- Modo separado de duplicados exactos; umbral configurable; papelera con progreso
+
 ## [0.9.3] - 2026-09-28
 
 ### Added

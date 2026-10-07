@@ -65,11 +65,42 @@ def run(
             # Nunca pasar "icon" en window_args → create_window no lo acepta
             app.native.window_args["resizable"] = True
             app.native.window_args["title"] = f"{settings.app.name}"
+            # Maximizada al iniciar (pywebview); si no se soporta, se ignora
+            app.native.window_args["maximized"] = True
             app.native.settings["ALLOW_DOWNLOADS"] = True
             if icon_file.exists():
                 apply_native_icon(icon_file, app_title=settings.app.name)
         except Exception as exc:
             logger.debug("native window args: %s", exc)
+
+        # Fallback: centrar tras crear la ventana (si no maximiza)
+        try:
+            from nicegui import app as ng_app
+
+            def _center_or_maximize() -> None:
+                try:
+                    w = getattr(ng_app.native, "main_window", None)
+                    if w is None:
+                        return
+                    # Preferir maximizar
+                    for attr in ("maximize", "maximized"):
+                        fn = getattr(w, attr, None)
+                        if callable(fn):
+                            fn()
+                            return
+                    if hasattr(w, "move") and hasattr(w, "resize"):
+                        # Centrar aprox. 1280x800
+                        try:
+                            w.resize(1280, 800)
+                            w.move(80, 40)
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    logger.debug("center/maximize: %s", exc)
+
+            ng_app.on_startup(_center_or_maximize)
+        except Exception as exc:
+            logger.debug("startup hook: %s", exc)
 
     run_kwargs = dict(
         title=settings.app.name,

@@ -57,9 +57,10 @@ def job_start(page: str, label: str) -> None:
 
 
 def job_progress(message: str, fraction: float | None) -> None:
+    """Actualiza estado del job. NO notifica listeners (puede llamarse desde un thread)."""
     _job["message"] = message
     _job["fraction"] = fraction
-    _notify_listeners()
+    # Evitar tocar la UI desde hilos de trabajo → provoca "Connection lost" en NiceGUI.
 
 
 def job_finish(notice: str | None = None) -> None:

@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import Sequence
 
 from filesage.core.config import Settings
-from filesage.domain.exceptions import ActionError
+from filesage.domain.exceptions import ActionError, CancelledError
 from filesage.domain.interfaces import IActionExecutor, IStorage
 from filesage.domain.models import ActionRecord, ActionType, Transaction
 from filesage.infrastructure.storage import SqliteStorage, new_action_id, new_transaction_id
 from filesage.infrastructure.trash import move_to_trash, permanent_delete, safe_copy, safe_move
+from filesage.infrastructure.transfer_io import copy_with_progress, move_with_progress
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,13 @@ class ActionManager(IActionExecutor):
         logger.info("Transaccion %s terminada: %d/%d OK", tx_id, ok, len(executed))
         return transaction
 
-    def _run_one(self, planned: ActionRecord, *, dry_run: bool) -> ActionRecord:
+    def _run_one(
+        self,
+        planned: ActionRecord,
+        *,
+        dry_run: bool,
+        progress=None,
+    ) -> ActionRecord:
         """Ejecuta una sola accion y devuelve el registro resultante."""
         action_id = planned.action_id or new_action_id()
         source = Path(planned.source)
@@ -110,13 +117,30 @@ class ActionManager(IActionExecutor):
             elif planned.action_type == ActionType.MOVE:
                 if not dest:
                     raise ActionError("MOVE requiere destination")
-                safe_move(source, dest)
-                message = f"Movido: {source} -> {dest}"
+                if progress is not None:
+                    def _cb(msg, frac, _i=None):
+                        # frac is within-op; parent maps overall
+                        progress.report(str(msg), None)
+                        progress.check()
+                    message = move_with_progress(
+                        source, dest, on_progress=_cb, check_cancel=progress.check
+                    )
+                else:
+                    safe_move(source, dest)
+                    message = f"Movido: {source} -> {dest}"
             elif planned.action_type == ActionType.COPY:
                 if not dest:
                     raise ActionError("COPY requiere destination")
-                safe_copy(source, dest)
-                message = f"Copiado: {source} -> {dest}"
+                if progress is not None:
+                    def _cb(msg, frac):
+                        progress.report(str(msg), None)
+                        progress.check()
+                    message = copy_with_progress(
+                        source, dest, on_progress=_cb, check_cancel=progress.check
+                    )
+                else:
+                    safe_copy(source, dest)
+                    message = f"Copiado: {source} -> {dest}"
             else:
                 raise ActionError(f"Tipo de accion no soportado: {planned.action_type}")
 
@@ -131,6 +155,8 @@ class ActionManager(IActionExecutor):
                 dry_run=False,
                 metadata=planned.metadata,
             )
+        except CancelledError:
+            raise
         except Exception as exc:
             logger.error("Fallo accion %s sobre %s: %s", planned.action_type, source, exc)
             return ActionRecord(

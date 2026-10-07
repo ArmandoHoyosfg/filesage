@@ -129,6 +129,7 @@ class JobControls:
             ui.notify("Cancelado", type="warning", position="top")
             return None
         except Exception as e:
+            # No relanzar: evita tumbar el servidor NiceGUI ("Connection lost")
             self.finish(f"Error: {e}", notify=False)
-            ui.notify(str(e), type="negative", position="top")
-            raise
+            ui.notify(str(e)[:300], type="negative", position="top")
+            return None

@@ -26,6 +26,14 @@ from filesage.presentation.web.session_store import bind_busy_button
 from filesage.presentation.web.selection_ui import selection_banner
 from filesage.presentation.web.confirm_actions import confirm_trash_preview
 from filesage.services.file_search import match_file, rank_hits
+from filesage.services.search_smart import (
+    SearchFilters,
+    SearchPreset,
+    delete_preset,
+    load_presets,
+    save_preset,
+    suggest_from_rows,
+)
 
 
 def _fmt(n: int) -> str:
@@ -210,7 +218,7 @@ def page_duplicates() -> None:
     }
 
     with page_frame("Duplicados", active_path="/duplicates"):
-        section_title("Duplicados", "Solo archivos con el MISMO contenido (hash completo). Mismo tamano no basta. Cancela si tarda.")
+        section_title("Duplicados", "Solo archivos con el MISMO contenido (hash completo). Para fotos parecidas pero no identicas usa Herramientas → Imagenes similares.")
         selection_banner(tool="duplicates")
         keep_strategy_sel = ui.select(
             {
@@ -686,11 +694,113 @@ def page_search() -> None:
                 value=saved.get("ext_filter") or "",
                 placeholder=".jpg",
             ).classes("max-w-xs")
+        with ui.expansion("Filtros inteligentes", icon="tune").classes(
+            "w-full max-w-2xl"
+        ):
+            with ui.row().classes("gap-4 flex-wrap items-end w-full"):
+                min_size_in = ui.number(
+                    "Tamano min (KB)",
+                    value=float(saved.get("min_size_kb") or 0),
+                    min=0,
+                    step=1,
+                ).classes("max-w-[9rem]")
+                max_size_in = ui.number(
+                    "Tamano max (KB, 0=sin limite)",
+                    value=float(saved.get("max_size_kb") or 0),
+                    min=0,
+                    step=1,
+                ).classes("max-w-[11rem]")
+                newer_days_in = ui.number(
+                    "Mas nuevos que (dias, 0=todos)",
+                    value=float(saved.get("newer_days") or 0),
+                    min=0,
+                    step=1,
+                ).classes("max-w-[11rem]")
+                images_only = ui.checkbox(
+                    "Solo imagenes",
+                    value=bool(saved.get("images_only")),
+                )
+                exclude_app = ui.checkbox(
+                    "Excluir carpetas FileSage_*",
+                    value=bool(saved.get("exclude_app_folders", True)),
+                )
+        with ui.expansion("Presets de busqueda", icon="bookmark").classes(
+            "w-full max-w-2xl"
+        ):
+            preset_name = ui.input("Nombre del preset").classes("max-w-sm")
+            preset_select = ui.select(
+                options={p.name: p.name for p in load_presets()} or {"": "(ninguno)"},
+                value=None,
+                label="Cargar preset",
+            ).classes("max-w-sm")
+
+            def _refresh_preset_options() -> None:
+                opts = {p.name: p.name for p in load_presets()}
+                preset_select.options = opts or {"": "(ninguno)"}
+                preset_select.update()
+
+            def _apply_preset() -> None:
+                name = preset_select.value
+                for pr in load_presets():
+                    if pr.name == name:
+                        query_input.value = pr.query
+                        only_ext.value = pr.ext_filter
+                        use_meta.value = pr.use_meta
+                        use_path.value = pr.use_path
+                        min_size_in.value = pr.min_size / 1024 if pr.min_size else 0
+                        max_size_in.value = pr.max_size / 1024 if pr.max_size else 0
+                        newer_days_in.value = pr.newer_days
+                        images_only.value = pr.images_only
+                        exclude_app.value = pr.exclude_app_folders
+                        ui.notify(f"Preset «{pr.name}» cargado", type="positive")
+                        return
+                ui.notify("Selecciona un preset", type="warning")
+
+            def _save_preset() -> None:
+                name = (preset_name.value or "").strip()
+                if not name:
+                    ui.notify("Pon un nombre al preset", type="warning")
+                    return
+                save_preset(
+                    SearchPreset(
+                        name=name,
+                        query=(query_input.value or "").strip(),
+                        ext_filter=(only_ext.value or "").strip(),
+                        use_meta=bool(use_meta.value),
+                        use_path=bool(use_path.value),
+                        min_size=int(float(min_size_in.value or 0) * 1024),
+                        max_size=int(float(max_size_in.value or 0) * 1024),
+                        newer_days=int(newer_days_in.value or 0),
+                        images_only=bool(images_only.value),
+                        exclude_app_folders=bool(exclude_app.value),
+                    )
+                )
+                _refresh_preset_options()
+                ui.notify(f"Preset «{name}» guardado", type="positive")
+
+            def _delete_preset() -> None:
+                name = preset_select.value
+                if not name:
+                    return
+                delete_preset(str(name))
+                _refresh_preset_options()
+                ui.notify("Preset eliminado", type="info")
+
+            with ui.row().classes("gap-2 flex-wrap"):
+                ui.button("Cargar", on_click=_apply_preset, icon="download").props(
+                    "outline dense"
+                )
+                ui.button("Guardar actual", on_click=_save_preset, icon="save").props(
+                    "outline dense color=primary"
+                )
+                ui.button("Eliminar", on_click=_delete_preset, icon="delete").props(
+                    "flat dense"
+                )
         ui.label(
-            "Inteligente: prioriza el nombre del archivo. Las carpetas de la app "
-            "(FileSage_converted, etc.) no cuentan como coincidencia de ruta. "
-            "Metadatos genericos (JPEG, Imagen…) no disparan resultados por si solos."
+            "Inteligente: prioriza el nombre. Filtros y presets evitan ruido. "
+            "Tras buscar veras sugerencias segun lo encontrado."
         ).classes("text-xs text-[#6b6b80] max-w-2xl")
+        suggestions_host = ui.column().classes("w-full gap-1")
         btn_run = ui.button("Buscar", icon="search").props("color=primary unelevated")
         job = JobControls(page_route="/search")
         bind_busy_button(btn_run)
@@ -819,6 +929,10 @@ def page_search() -> None:
                         ).props("flat dense")
                         ui.button(
                             "Smart", on_click=lambda: send_to("/smart", "smart")
+                        ).props("flat dense")
+                        ui.button(
+                            "Copiar / Mover",
+                            on_click=lambda: send_to("/tools/transfer", "transfer"),
                         ).props("flat dense")
                         ui.button(
                             "Organizar",
@@ -1046,6 +1160,70 @@ def page_search() -> None:
             dest.write_text("\n".join(str(p) for p in paths), encoding="utf-8")
             ui.notify(f"Exportado: {dest}", type="positive")
 
+
+        def _show_suggestions(rows: list) -> None:
+            suggestions_host.clear()
+            selected = []
+            for r in rows:
+                if state["checks"].get(str(r.get("path")), False):
+                    selected.append(r)
+            base = selected or list(rows)
+            tips = suggest_from_rows(base)
+            with suggestions_host:
+                if not tips:
+                    return
+                ui.label("Sugerencias inteligentes").classes(
+                    "text-sm font-medium text-primary mt-2"
+                )
+                with ui.row().classes("gap-2 flex-wrap"):
+                    for tip in tips:
+                        def _go(action=tip.action, title=tip.title):
+                            paths = _selected_paths()
+                            if action == "convert":
+                                for r in state["results"]:
+                                    pth = str(r.get("path") or "")
+                                    if Path(pth).suffix.lower() in {
+                                        ".png", ".jpg", ".jpeg", ".webp",
+                                        ".bmp", ".gif", ".tif", ".tiff",
+                                    }:
+                                        state["checks"][pth] = True
+                                ui.notify(
+                                    title + " — marca imagenes y usa Convertir",
+                                    type="info",
+                                )
+                                render()
+                                return
+                            if action == "duplicates":
+                                if not paths and state["results"]:
+                                    for r in state["results"][:100]:
+                                        state["checks"][str(r["path"])] = True
+                                send_to("/duplicates", "duplicates")
+                                return
+                            if action == "organize":
+                                send_to("/tools/organize", "organize")
+                                return
+                            if action == "cleanup":
+                                send_to("/tools/cleanup", "cleanup")
+                                return
+                            if action == "similar":
+                                paths = paths or [
+                                    Path(r["path"]) for r in state["results"][:50]
+                                ]
+                                parents = {str(Path(p).parent) for p in paths}
+                                if len(parents) == 1:
+                                    session_store.update_page_state(
+                                        "/tools/similar",
+                                        folder_path=next(iter(parents)),
+                                    )
+                                ui.navigate.to("/tools/similar")
+                                return
+
+                        ui.button(
+                            tip.title,
+                            on_click=_go,
+                            icon="auto_awesome",
+                        ).props("outline dense color=primary").tooltip(tip.detail)
+
         async def do_search() -> None:
             root = Path(folder.path_value() or "").expanduser()
             q = (query_input.value or "").strip().lower()
@@ -1084,6 +1262,15 @@ def page_search() -> None:
                             mime = ident.mime
                         except Exception:
                             pass
+                    filters = SearchFilters(
+                        min_size=int(float(min_size_in.value or 0) * 1024),
+                        max_size=int(float(max_size_in.value or 0) * 1024),
+                        newer_days=int(newer_days_in.value or 0),
+                        images_only=bool(images_only.value),
+                        exclude_app_folders=bool(exclude_app.value),
+                    )
+                    if not filters.allows(fi.path, int(fi.size), fi.mtime):
+                        continue
                     hit = match_file(
                         path=fi.path,
                         size=int(fi.size),
@@ -1135,10 +1322,16 @@ def page_search() -> None:
                 use_meta=bool(use_meta.value),
                 use_path=bool(use_path.value),
                 ext_filter=ext_f,
+                min_size_kb=float(min_size_in.value or 0),
+                max_size_kb=float(max_size_in.value or 0),
+                newer_days=int(newer_days_in.value or 0),
+                images_only=bool(images_only.value),
+                exclude_app_folders=bool(exclude_app.value),
             )
             job.status.set_text(status_msg)
             ui.notify(status_msg, type="positive", position="top")
             render()
+            _show_suggestions(results)
 
         if state["results"]:
             render()
@@ -1161,10 +1354,28 @@ def page_tools() -> None:
         section_title("Herramientas", "Utilidades inteligentes sobre el mismo motor local.")
         with ui.row().classes("gap-4 flex-wrap"):
             feature_card(
+                "/tools/disk",
+                "Diagnostico de disco",
+                "hard_drive",
+                "Comprueba unidades extraibles: lectura, espacio y errores tipicos",
+            )
+            feature_card(
+                "/tools/transfer",
+                "Copiar / Mover",
+                "drive_file_move",
+                "Copia o mueve archivos y carpetas a otro destino (con dry-run)",
+            )
+            feature_card(
                 "/tools/convert",
                 "Convertir imagenes",
                 "image",
                 "Cualquier formato → PNG, JPG, WEBP… en carpeta aparte",
+            )
+            feature_card(
+                "/tools/similar",
+                "Imagenes similares",
+                "photo_library",
+                "Parecidas visualmente (redimensionadas/comprimidas), no solo identicas",
             )
             feature_card(
                 "/tools/empty",
@@ -2325,6 +2536,740 @@ def page_zip() -> None:
         btn.on_click(run)
         with result_area:
             empty_state("Elige una carpeta", "Se generara un archivo .zip.", icon="folder_zip")
+
+
+
+
+@ui.page("/tools/similar")
+def page_similar_images() -> None:
+    """Imagenes visualmente similares (B2) — modo distinto a duplicados exactos."""
+    engine = get_engine()
+    saved = session_store.get_page_state("/tools/similar")
+    state: dict = {
+        "groups": saved.get("groups") or [],
+        "status": saved.get("status", ""),
+    }
+
+    with page_frame("Imagenes similares", active_path="/tools"):
+        section_title(
+            "Imagenes similares",
+            "Detecta fotos parecidas (redimensionadas, recomprimidas). "
+            "No sustituye a Duplicados exactos: aqui el contenido puede diferir en bytes.",
+        )
+        folder = folder_field(label="Carpeta", value=saved.get("folder_path"))
+        threshold = ui.number(
+            "Umbral Hamming (menor = mas estricto)",
+            value=float(saved.get("threshold") or 12),
+            min=0,
+            max=64,
+            step=1,
+        ).classes("max-w-xs")
+        ui.label(
+            "Guia: 0–5 casi iguales · 8–15 muy similares · 20+ permisivo (mas falsos positivos)."
+        ).classes("text-xs text-[#6b6b80]")
+        btn_run = ui.button("Buscar similares", icon="photo_library").props(
+            "color=primary unelevated"
+        )
+        job = JobControls(page_route="/tools/similar")
+        bind_busy_button(btn_run)
+        actions = ui.row().classes("gap-2 flex-wrap")
+        host = ui.column().classes("w-full gap-2")
+
+        def _render() -> None:
+            host.clear()
+            actions.clear()
+            groups = state["groups"]
+            with host:
+                if not groups:
+                    empty_state(
+                        "Sin grupos",
+                        "Elige una carpeta con fotos y pulsa Buscar.",
+                        icon="photo_library",
+                    )
+                    return
+                for i, g in enumerate(groups[:80], 1):
+                    # groups may be dicts after session restore or objects
+                    if isinstance(g, dict):
+                        files = g.get("files") or []
+                        max_d = g.get("max_distance", "?")
+                        wasted = int(g.get("wasted_size") or 0)
+                        names = [Path(str(f)).name for f in files[:6]]
+                        nfiles = len(files)
+                    else:
+                        files = list(g.files)
+                        max_d = g.max_distance
+                        wasted = g.wasted_size
+                        names = [f.path.name for f in files[:6]]
+                        nfiles = len(files)
+                    with ui.card().classes("fs-card w-full p-3"):
+                        ui.label(
+                            f"Grupo {i} · {nfiles} imagenes · dist≤{max_d} · "
+                            f"~{_fmt(wasted)} recuperables"
+                        ).classes("font-medium")
+                        ui.label(" · ".join(names)).classes(
+                            "text-xs text-[#9898b0] break-all"
+                        )
+            with actions:
+                ui.button(
+                    "Simular → papelera (conserva la mas grande)",
+                    on_click=lambda: do_clean(True),
+                    icon="science",
+                ).props("outline color=primary")
+                ui.button(
+                    "Enviar a papelera",
+                    on_click=lambda: do_clean(False),
+                    icon="delete",
+                ).props("color=negative unelevated")
+
+        def _serialize(groups):
+            out = []
+            for g in groups:
+                out.append(
+                    {
+                        "files": [str(f.path) for f in g.files],
+                        "max_distance": g.max_distance,
+                        "wasted_size": g.wasted_size,
+                        "threshold": g.threshold,
+                    }
+                )
+            return out
+
+        async def do_search() -> None:
+            root = Path(folder.path_value() or "").expanduser()
+            if not root.is_dir():
+                ui.notify("Carpeta invalida", type="negative")
+                return
+            th = int(threshold.value or 12)
+            host.clear()
+            actions.clear()
+
+            def work(reporter):
+                return engine.find_similar_images(
+                    root, threshold=th, progress=reporter
+                )
+
+            result = await job.run(
+                work, start_msg="Buscando imagenes similares…"
+            )
+            if result is None:
+                return
+            scan, groups = result
+            state["groups"] = groups
+            status = f"{len(groups)} grupos · {scan.total_files} archivos escaneados"
+            session_store.update_page_state(
+                "/tools/similar",
+                groups=_serialize(groups),
+                status=status,
+                folder_path=str(root),
+                threshold=th,
+            )
+            job.status.set_text(status)
+            ui.notify(status, type="positive")
+            _render()
+
+        async def do_clean(dry: bool) -> None:
+            groups = state["groups"]
+            if not groups:
+                ui.notify("Primero busca", type="warning")
+                return
+            # Reconstruir objetos minimos si vienen de sesion
+            from filesage.domain.models import FileInfo
+            from filesage.services.similar_images import SimilarImageGroup
+
+            rebuilt = []
+            for g in groups:
+                if isinstance(g, SimilarImageGroup):
+                    rebuilt.append(g)
+                    continue
+                files = []
+                for p in g.get("files") or []:
+                    path = Path(p)
+                    try:
+                        st = path.stat()
+                        files.append(
+                            FileInfo(
+                                path=path,
+                                size=st.st_size,
+                                mtime=st.st_mtime,
+                                is_symlink=path.is_symlink(),
+                            )
+                        )
+                    except OSError:
+                        continue
+                if len(files) >= 2:
+                    rebuilt.append(
+                        SimilarImageGroup(
+                            fingerprint="",
+                            files=tuple(files),
+                            max_distance=int(g.get("max_distance") or 0),
+                            threshold=int(g.get("threshold") or 12),
+                        )
+                    )
+            plans = engine.plan_trash_similar_images(rebuilt, keep_largest=True)
+            if not plans:
+                ui.notify("Nada que enviar", type="info")
+                return
+
+            async def run_batch(dry_run: bool) -> None:
+                def work(reporter):
+                    return engine.execute_actions_progressed(
+                        plans, dry_run=dry_run, progress=reporter
+                    )
+
+                tx = await job.run(
+                    work,
+                    start_msg=f"{'Simulando' if dry_run else 'Papelera'} {len(plans)}…",
+                )
+                if tx is None:
+                    return
+                ok = sum(1 for a in tx.actions if a.success)
+                ui.notify(f"{ok}/{len(tx.actions)} OK", type="positive")
+
+            if dry:
+                await run_batch(True)
+            else:
+                paths = [a.source for a in plans]
+                await confirm_trash_preview(
+                    paths,
+                    title="Papelera — imagenes similares",
+                    on_confirm=lambda: run_batch(False),
+                )
+
+        if state["groups"]:
+            _render()
+            if state.get("status"):
+                job.status.set_text(state["status"])
+        else:
+            with host:
+                empty_state(
+                    "Busca imagenes parecidas",
+                    "Ideal para capturas, exports y fotos redimensionadas.",
+                    icon="photo_library",
+                )
+        btn_run.on_click(do_search)
+
+
+
+
+
+
+
+@ui.page("/tools/disk")
+def page_disk_diag() -> None:
+    """Diagnostico rapido de discos y unidades extraibles."""
+    from filesage.services.disk_diagnostics import diagnose_path
+
+    saved = session_store.get_page_state("/tools/disk")
+    with page_frame("Diagnostico de disco", active_path="/tools"):
+        section_title(
+            "Diagnostico de disco / USB",
+            "Prueba rapida de acceso, espacio y lectura. No repara el disco; "
+            "sirve para saber si conviene copiar mucho o si hay daños.",
+        )
+        folder = folder_field(
+            label="Unidad o carpeta a comprobar",
+            value=saved.get("path"),
+        )
+        btn = ui.button("Diagnosticar", icon="health_and_safety").props(
+            "color=primary unelevated"
+        )
+        job = JobControls(page_route="/tools/disk")
+        bind_busy_button(btn)
+        host = ui.column().classes("w-full gap-2")
+
+        async def run() -> None:
+            path = (folder.path_value() or "").strip()
+            if not path:
+                ui.notify("Indica una unidad (ej. F:\\) o carpeta", type="warning")
+                return
+
+            def work(reporter):
+                reporter.report("Comprobando acceso y lectura…", 0.2)
+                report = diagnose_path(path)
+                reporter.report(report.summary, 1.0)
+                return report
+
+            report = await job.run(work, start_msg="Diagnostico…")
+            if report is None:
+                return
+            session_store.update_page_state("/tools/disk", path=path)
+            host.clear()
+            with host:
+                ui.label(report.summary).classes("text-lg font-medium")
+                if report.free_gb is not None:
+                    ui.label(
+                        f"Espacio: {report.free_gb:.1f} GB libres / {report.total_gb:.1f} GB"
+                    ).classes("text-sm text-[#9898b0]")
+                if report.read_mbs is not None:
+                    ui.label(
+                        f"Lectura muestra: ~{report.read_mbs:.1f} MB/s · "
+                        f"{report.sample_files} archivos · {report.sample_errors} errores"
+                    ).classes("text-sm text-[#9898b0]")
+                for f in report.findings:
+                    color = {
+                        "ok": "positive",
+                        "warn": "warning",
+                        "error": "negative",
+                        "info": "info",
+                    }.get(f.level, "info")
+                    with ui.card().classes("fs-card w-full p-3"):
+                        ui.badge(f.level.upper()).props(f"color={color}")
+                        ui.label(f.title).classes("font-medium")
+                        ui.label(f.detail).classes("text-sm text-[#9898b0] break-all")
+                with ui.row().classes("gap-2 mt-2"):
+                    ui.button(
+                        "Ir a Copiar / Mover",
+                        on_click=lambda: ui.navigate.to("/tools/transfer"),
+                        icon="drive_file_move",
+                    ).props("outline")
+            ui.notify(report.summary, type="positive" if "sin errores" in report.summary.lower() else "warning")
+
+        with host:
+            empty_state(
+                "Comprueba un USB o disco antes de copias grandes",
+                "Si hay errores de lectura, copia por carpetas pequeñas y revisa el disco.",
+                icon="hard_drive",
+            )
+        btn.on_click(run)
+
+
+
+@ui.page("/tools/transfer")
+def page_transfer() -> None:
+    """Copiar o mover archivos y carpetas completas a un destino."""
+    from datetime import datetime
+
+    from filesage.domain.models import ActionRecord, ActionType
+    from filesage.infrastructure.storage import new_action_id
+
+    engine = get_engine()
+    saved = session_store.get_page_state("/tools/transfer")
+
+    # Seleccion previa (Buscar) o sesion
+    initial_sources: list[str] = []
+    if hasattr(session_store, "get_selection"):
+        try:
+            bag = session_store.get_selection()
+            if bag:
+                paths = getattr(bag, "paths", None) or (
+                    bag.get("paths") if isinstance(bag, dict) else None
+                )
+                if paths:
+                    initial_sources = [str(x) for x in paths]
+        except Exception:
+            pass
+    if not initial_sources:
+        initial_sources = [str(x) for x in (saved.get("sources") or [])]
+
+    state: dict = {
+        "sources": list(initial_sources),
+        "plans": saved.get("plans") or [],
+        "status": saved.get("status") or "",
+    }
+
+    with page_frame("Copiar / Mover", active_path="/tools"):
+        selection_banner(tool="transfer")
+        section_title(
+            "Copiar o mover archivos y carpetas",
+            "Puedes copiar/mover **carpetas completas** (con todo su contenido) o archivos sueltos. "
+            "Simula siempre antes de aplicar. Los movimientos se pueden deshacer desde Historial.",
+        )
+
+        mode = ui.toggle(
+            {"copy": "Copiar", "move": "Mover"},
+            value=saved.get("mode") or "copy",
+        ).props("no-caps")
+        conflict = ui.select(
+            {
+                "rename": "Si existe: renombrar (nombre_1)",
+                "skip": "Si existe: omitir",
+                "overwrite": "Si existe: sobrescribir",
+            },
+            value=saved.get("on_conflict") or "skip",
+            label="Conflictos de nombre",
+        ).classes("max-w-md")
+        expand_contents = ui.checkbox(
+            "Copiar/mover el CONTENIDO de carpetas y unidades (recomendado)",
+            value=bool(saved.get("expand_dir_contents", True)),
+        )
+        ui.label(
+            "Con una unidad (F:) o carpeta: se listan sus elementos y se envían al destino. "
+            "«Omitir» salta lo que ya exista en el destino."
+        ).classes("text-xs text-[#6b6b80] max-w-2xl")
+
+        # --- Origenes ---
+        ui.label("1. Origenes (archivos o carpetas completas)").classes(
+            "text-sm font-medium mt-3"
+        )
+        sources_input = ui.textarea(
+            label="Lista de origenes (una ruta por linea)",
+            value="\n".join(state["sources"]),
+            placeholder=r"Ejemplos:" + "\n"
+            r"F:\Fotos\Vacaciones" + "\n"
+            r"C:\Users\Public\documento.pdf",
+        ).classes("w-full max-w-2xl").props("outlined autogrow")
+
+        with ui.row().classes("gap-2 flex-wrap items-end w-full max-w-2xl"):
+            origin_picker = folder_field(label="Elegir carpeta de origen")
+
+            def _add_origin_folder() -> None:
+                raw = (origin_picker.path_value() or "").strip().strip('"')
+                if not raw:
+                    ui.notify("Elige una carpeta con Examinar…", type="warning")
+                    return
+                path = Path(raw)
+                # Normalizar raíces de unidad Windows: F: -> F:\
+                if len(raw) == 2 and raw[1] == ":":
+                    path = Path(raw + "\\")
+                    raw = str(path)
+                if not path.exists():
+                    ui.notify(f"No existe: {raw}", type="negative")
+                    return
+                cur = [
+                    ln.strip()
+                    for ln in (sources_input.value or "").splitlines()
+                    if ln.strip()
+                ]
+                if raw not in cur and str(path) not in cur:
+                    cur.append(str(path))
+                sources_input.value = "\n".join(cur)
+                kind = "carpeta" if path.is_dir() else "archivo"
+                ui.notify(f"Añadido ({kind}): {path}", type="positive")
+
+            ui.button(
+                "Añadir a la lista",
+                on_click=_add_origin_folder,
+                icon="add",
+            ).props("outline color=primary")
+
+            def _from_selection() -> None:
+                paths: list[str] = []
+                if hasattr(session_store, "get_selection"):
+                    try:
+                        bag = session_store.get_selection()
+                        raw_paths = getattr(bag, "paths", None) or (
+                            bag.get("paths") if isinstance(bag, dict) else []
+                        )
+                        paths = [str(p) for p in (raw_paths or [])]
+                    except Exception:
+                        paths = []
+                if not paths:
+                    ui.notify(
+                        "No hay selección. En Buscar marca archivos y envía a Copiar/Mover.",
+                        type="warning",
+                    )
+                    return
+                cur = [
+                    ln.strip()
+                    for ln in (sources_input.value or "").splitlines()
+                    if ln.strip()
+                ]
+                for pth in paths:
+                    if pth not in cur:
+                        cur.append(pth)
+                sources_input.value = "\n".join(cur)
+                ui.notify(f"{len(paths)} rutas desde Buscar", type="positive")
+
+            ui.button(
+                "Usar selección de Buscar",
+                on_click=_from_selection,
+                icon="playlist_add",
+            ).props("outline")
+
+        # --- Destino ---
+        ui.label("2. Carpeta destino").classes("text-sm font-medium mt-4")
+        dest = folder_field(
+            label="Destino (carpeta donde copiar/mover)",
+            value=saved.get("dest_path"),
+        )
+
+        with ui.row().classes("gap-2 flex-wrap items-center"):
+            btn_plan = ui.button("Preparar plan", icon="playlist_add_check").props(
+                "color=primary unelevated"
+            )
+
+            def _diag_origin() -> None:
+                raw = (origin_picker.path_value() or "").strip()
+                lines = [
+                    ln.strip()
+                    for ln in (sources_input.value or "").splitlines()
+                    if ln.strip()
+                ]
+                target = raw or (lines[0] if lines else "")
+                if target:
+                    session_store.update_page_state("/tools/disk", path=target)
+                ui.navigate.to("/tools/disk")
+
+            ui.button(
+                "Diagnosticar origen",
+                on_click=_diag_origin,
+                icon="health_and_safety",
+            ).props("outline")
+        ui.label(
+            "Si la barra se queda mucho rato en una carpeta, es normal: se está copiando "
+            "archivo a archivo (USB lentos o con errores tardan más). Cancela si el disco se desconecta."
+        ).classes("text-xs text-[#6b6b80] max-w-2xl")
+        job = JobControls(page_route="/tools/transfer")
+        bind_busy_button(btn_plan)
+        summary = ui.label(state.get("status") or "").classes("text-sm text-[#9898b0]")
+        actions = ui.row().classes("gap-2 flex-wrap")
+        host = ui.column().classes("w-full gap-2")
+
+        def _normalize_path(raw: str) -> Path:
+            raw = raw.strip().strip('"')
+            if len(raw) == 2 and raw[1] == ":":
+                raw = raw + "\\"
+            return Path(raw).expanduser()
+
+        def _collect_sources() -> list[Path]:
+            """Origenes de la lista + campo de carpeta si tiene valor."""
+            lines = [
+                ln.strip()
+                for ln in (sources_input.value or "").splitlines()
+                if ln.strip()
+            ]
+            # Auto-incluir el picker de origen si el usuario olvido pulsar Añadir
+            picked = (origin_picker.path_value() or "").strip().strip('"')
+            if picked and picked not in lines:
+                lines.append(picked)
+            out: list[Path] = []
+            for ln in lines:
+                pth = _normalize_path(ln)
+                if pth.exists():
+                    out.append(pth)
+            return out
+
+        def _render_plan() -> None:
+            host.clear()
+            actions.clear()
+            plans = state.get("plans") or []
+            with host:
+                if not plans:
+                    empty_state(
+                        "Sin plan",
+                        "Añade carpetas o archivos de origen y un destino.",
+                        icon="drive_file_move",
+                    )
+                    return
+                for row in plans[:300]:
+                    if isinstance(row, dict):
+                        src, dst, kind = (
+                            row.get("source"),
+                            row.get("dest"),
+                            row.get("type"),
+                        )
+                    else:
+                        src = str(row.source)
+                        dst = str(row.destination or "")
+                        kind = row.action_type.value
+                    src_p = Path(str(src))
+                    badge = "📁 carpeta" if src_p.is_dir() else "📄 archivo"
+                    with ui.card().classes("fs-card w-full p-3"):
+                        ui.label(
+                            f"{(kind or '').upper()} · {badge} · {src_p.name}"
+                        ).classes("font-medium")
+                        ui.label(str(src)).classes("text-xs text-[#6b6b80] break-all")
+                        ui.label(f"→ {dst}").classes("text-xs text-primary break-all")
+            with actions:
+                ui.button(
+                    "Simular", on_click=lambda: do_exec(True), icon="science"
+                ).props("outline color=primary")
+                ui.button(
+                    "Ejecutar de verdad",
+                    on_click=lambda: do_exec(False),
+                    icon="play_arrow",
+                ).props("color=primary unelevated")
+
+        def _serialize(plans):
+            return [
+                {
+                    "source": str(a.source),
+                    "dest": str(a.destination or ""),
+                    "type": a.action_type.value,
+                }
+                for a in plans
+            ]
+
+        def build_plan() -> None:
+            srcs = _collect_sources()
+            dest_raw = (dest.path_value() or "").strip()
+            dest_p = _normalize_path(dest_raw) if dest_raw else None
+
+            if not srcs:
+                # Diagnostico util
+                lines = [
+                    ln.strip()
+                    for ln in (sources_input.value or "").splitlines()
+                    if ln.strip()
+                ]
+                picked = (origin_picker.path_value() or "").strip()
+                if not lines and not picked:
+                    ui.notify(
+                        "Añade al menos un origen: escribe una ruta, usa Examinar y «Añadir a la lista», o trae la selección de Buscar.",
+                        type="warning",
+                    )
+                else:
+                    ui.notify(
+                        "Las rutas indicadas no existen o no son accesibles. Revisa unidades y permisos.",
+                        type="negative",
+                    )
+                return
+            if not dest_p or not dest_p.is_dir():
+                ui.notify(
+                    "El destino debe ser una carpeta existente (usa Examinar…).",
+                    type="negative",
+                )
+                return
+
+            # Actualizar textarea con origenes resueltos (feedback)
+            sources_input.value = "\n".join(str(s) for s in srcs)
+
+            m = str(mode.value or "copy")
+            plans = engine.plan_transfer(
+                srcs,
+                dest_p,
+                mode=m,
+                on_conflict=str(conflict.value or "skip"),
+                expand_dir_contents=bool(expand_contents.value),
+            )
+            if not plans:
+                ui.notify(
+                    "No se generaron acciones: todo ya existe en el destino (omitir), "
+                    "la carpeta está vacía, o no se pudo leer el origen. "
+                    "Prueba «renombrar» si quieres forzar copias con otro nombre.",
+                    type="warning",
+                )
+                return
+
+            n_dirs = sum(1 for s in srcs if s.is_dir())
+            n_files = sum(1 for s in srcs if s.is_file())
+            state["plans"] = plans
+            state["sources"] = [str(s) for s in srcs]
+            status = (
+                f"{len(plans)} acciones · {m} · "
+                f"{n_dirs} carpeta(s), {n_files} archivo(s)"
+            )
+            state["status"] = status
+            session_store.update_page_state(
+                "/tools/transfer",
+                sources=state["sources"],
+                plans=_serialize(plans),
+                status=status,
+                dest_path=str(dest_p),
+                mode=m,
+                on_conflict=str(conflict.value or "skip"),
+                expand_dir_contents=bool(expand_contents.value),
+            )
+            summary.set_text(status)
+            job.status.set_text(status)
+            ui.notify(status, type="positive")
+            _render_plan()
+
+        async def do_exec(dry: bool) -> None:
+            plans = state.get("plans") or []
+            if not plans:
+                ui.notify("Prepara un plan primero", type="warning")
+                return
+
+            rebuilt: list[ActionRecord] = []
+            for item in plans:
+                if isinstance(item, ActionRecord):
+                    rebuilt.append(item)
+                    continue
+                at = (
+                    ActionType.MOVE
+                    if (item.get("type") == "move")
+                    else ActionType.COPY
+                )
+                rebuilt.append(
+                    ActionRecord(
+                        action_id=new_action_id(),
+                        action_type=at,
+                        source=Path(item["source"]),
+                        destination=Path(item["dest"]) if item.get("dest") else None,
+                        timestamp=datetime.now(),
+                        success=False,
+                        message="",
+                        dry_run=True,
+                        metadata={"from": "transfer"},
+                    )
+                )
+
+            async def run_batch(dry_run: bool) -> None:
+                def work(reporter):
+                    return engine.execute_actions_progressed(
+                        rebuilt, dry_run=dry_run, progress=reporter
+                    )
+
+                tx = await job.run(
+                    work,
+                    start_msg=f"{'Simulando' if dry_run else 'Ejecutando'} {len(rebuilt)}…",
+                )
+                if tx is None:
+                    return
+                ok = sum(1 for a in tx.actions if a.success)
+                fail = [a for a in tx.actions if not a.success]
+                incomplete = [
+                    a for a in tx.actions
+                    if a.success and a.message and (
+                        "omitidos" in a.message or "Incompletos" in a.message
+                    )
+                ]
+                msg = (
+                    f"{'Simulación' if dry_run else 'Hecho'}: "
+                    f"{ok}/{len(tx.actions)} OK · {tx.transaction_id[:8]}…"
+                )
+                if fail:
+                    msg += f" · {len(fail)} fallaron"
+                if incomplete:
+                    msg += f" · {len(incomplete)} con archivos omitidos"
+                job.status.set_text(msg)
+                summary.set_text(msg)
+                # Detalle de incompletos / fallos
+                details = []
+                for a in (fail + incomplete)[:8]:
+                    details.append(f"• {Path(a.source).name}: {(a.message or '')[:120]}")
+                if details:
+                    with host:
+                        with ui.card().classes("fs-card w-full p-3 mt-2"):
+                            ui.label("Incompletos / omitidos / errores").classes(
+                                "font-medium text-warning"
+                            )
+                            for line in details:
+                                ui.label(line).classes("text-xs text-[#9898b0] break-all")
+                            ui.label(
+                                "Los archivos problemáticos se saltaron; el resto se copió. "
+                                "Revisa el USB si hay muchos omitidos."
+                            ).classes("text-xs mt-1")
+                ui.notify(msg, type="positive" if not fail else "warning")
+
+            if dry:
+                await run_batch(True)
+                return
+
+            paths = [str(a.source) for a in rebuilt]
+            label = "MOVER" if str(mode.value) == "move" else "COPIAR"
+
+            async def confirm() -> None:
+                await run_batch(False)
+
+            await confirm_trash_preview(
+                paths,
+                title=f"Confirmar {label} (archivos y carpetas)",
+                confirm_word="OK",
+                on_confirm=confirm,
+            )
+
+        if state.get("plans"):
+            _render_plan()
+        else:
+            with host:
+                empty_state(
+                    "Carpetas completas o archivos sueltos",
+                    "1) Añade orígenes  →  2) Elige destino  →  3) Preparar plan  →  Simular / Ejecutar",
+                    icon="drive_file_move",
+                )
+        btn_plan.on_click(build_plan)
 
 
 @ui.page("/history")
