@@ -30,6 +30,7 @@ EXPECTED_ROUTES = {
     "/tools/zip",
     "/tools/transfer",
     "/tools/disk",
+    "/tools/metadata",
     "/history",
     "/settings",
     "/about",

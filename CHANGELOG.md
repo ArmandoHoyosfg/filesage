@@ -1,3 +1,52 @@
+## [0.9.21] - 2026-11-19
+
+### Fixed
+- Metadatos: RuntimeError al quitar archivo/panel (rebuild diferido fuera del slot eliminado de NiceGUI)
+
+## [0.9.20] - 2026-11-19
+
+### Changed
+- Metadatos: quitar archivo, quitar panel completo, restaurar valores y vaciar todos los paneles
+
+## [0.9.19] - 2026-11-18
+
+### Changed
+- Metadatos: panel independiente por tipo (PDF / JPEG / Audio)
+- Lectura automatica al seleccionar; muestra valor actual y campo editable
+- Aplicar/Simular por tipo o global; solo escribe campos modificados
+
+## [0.9.18] - 2026-11-18
+
+### Changed
+- Metadatos: selector grafico multi-archivo + lista agrupada por tipo (PDF/JPEG/Audio)
+- Ruta manual solo como opcion secundaria (expansion)
+
+## [0.9.17] - 2026-11-18
+
+### Added
+- Metadatos **fase 2 — audio**: MP3, FLAC, OGG/Opus, M4A/AAC, WMA, WAV (mutagen)
+- Mismos campos UI (creador→artist, asunto→album, copyright, comment, licencia)
+- Copia temporal + save + verificacion + backup
+
+## [0.9.16] - 2026-11-18
+
+### Added
+- **Metadatos** (`/tools/metadata`): leer/editar creador, autor, derechos, licencia, titulo (PDF + JPEG)
+- Escritura atomica, verificacion post-escritura, backup `.filesage_meta.bak`, dry-run
+- Dependencia `piexif` para EXIF JPEG sin re-encodear pixeles
+
+## [0.9.15] - 2026-10-06
+
+### Fixed
+- No copiar System Volume Information / $Recycle.Bin
+- Timeout adaptativo (archivos pequeños se saltan antes en USB lentos)
+- Stall más agresivo (12s sin progreso)
+
+## [0.9.14] - 2026-10-06
+
+### Added
+- Diagnostico Windows: Get-Volume, Get-PhysicalDisk, SMART PredictFailure, eventos System (disk/NTFS 7,11,51,55,98,153…)
+
 ## [0.9.13] - 2026-10-06
 
 ### Fixed

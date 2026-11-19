@@ -39,6 +39,54 @@ async def pick_folder_dialog(start: str | None = None) -> str | None:
         return None
 
 
+
+async def pick_files_dialog(
+    start: str | None = None,
+    *,
+    allow_multiple: bool = True,
+    file_types: tuple[str, ...] = (
+        "Archivos soportados (*.pdf;*.jpg;*.jpeg;*.mp3;*.flac;*.ogg;*.m4a)",
+        "PDF (*.pdf)",
+        "JPEG (*.jpg;*.jpeg)",
+        "Audio (*.mp3;*.flac;*.ogg;*.m4a;*.wav)",
+        "Todos (*.*)",
+    ),
+) -> list[str]:
+    """Dialogo nativo de archivos (multi). Devuelve lista de rutas o []."""
+    try:
+        from nicegui import app
+        import webview
+
+        if app.native.main_window is None:
+            return []
+
+        kwargs: dict = {
+            "allow_multiple": allow_multiple,
+        }
+        # pywebview FileDialog.OPEN
+        open_type = getattr(
+            getattr(webview, "FileDialog", object),
+            "OPEN",
+            getattr(webview, "OPEN_DIALOG", None),
+        )
+        if open_type is not None:
+            kwargs["dialog_type"] = open_type
+        if start:
+            kwargs["directory"] = start
+        if file_types:
+            kwargs["file_types"] = list(file_types)
+
+        result = await app.native.main_window.create_file_dialog(**kwargs)
+        if not result:
+            return []
+        if isinstance(result, (list, tuple)):
+            return [str(x) for x in result if x]
+        return [str(result)]
+    except Exception:
+        return []
+
+
+
 def folder_field(
     *,
     label: str = "Carpeta",

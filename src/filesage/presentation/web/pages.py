@@ -19,7 +19,7 @@ from filesage.presentation.web.jobs import JobControls
 from filesage.presentation.web import session_store
 from filesage.presentation.web.layout import page_frame
 from filesage.presentation.web.ui_helpers import empty_state, feature_card, section_title
-from filesage.presentation.web.path_picker import folder_field, workspace_bar
+from filesage.presentation.web.path_picker import folder_field, workspace_bar, pick_files_dialog
 from filesage.presentation.web.context import get_workspace
 from filesage.core.workspace_safety import assess_workspace
 from filesage.presentation.web.session_store import bind_busy_button
@@ -1354,10 +1354,16 @@ def page_tools() -> None:
         section_title("Herramientas", "Utilidades inteligentes sobre el mismo motor local.")
         with ui.row().classes("gap-4 flex-wrap"):
             feature_card(
+                "/tools/metadata",
+                "Metadatos",
+                "description",
+                "Ver y editar creador, derechos, licencia… (PDF, JPEG, audio; con backup)",
+            )
+            feature_card(
                 "/tools/disk",
                 "Diagnostico de disco",
                 "hard_drive",
-                "Comprueba unidades extraibles: lectura, espacio y errores tipicos",
+                "Lectura + eventos Windows, SMART y salud del volumen (USB/disco)",
             )
             feature_card(
                 "/tools/transfer",
@@ -2754,6 +2760,515 @@ def page_similar_images() -> None:
 
 
 
+
+
+@ui.page("/tools/metadata")
+def page_metadata() -> None:
+    """Paneles por tipo (PDF / JPEG / Audio) con metadatos actuales precargados."""
+    from filesage.services.metadata_editor import detect_kind, read_metadata
+    from filesage.presentation.web.path_picker import pick_files_dialog
+    from filesage.presentation.web.context import get_workspace
+
+    engine = get_engine()
+    saved = session_store.get_page_state("/tools/metadata")
+    state: dict = {
+        "paths": list(saved.get("paths") or []),
+        "snaps": {},  # path -> snapshot dict
+    }
+
+    # Campos por tipo (etiquetas de UI)
+    TYPE_FIELDS = {
+        "pdf": [
+            ("title", "Titulo"),
+            ("author", "Autor"),
+            ("creator", "Creador / Producer"),
+            ("subject", "Asunto"),
+            ("copyright", "Derechos de autor"),
+            ("license", "Licencia / Keywords"),
+            ("comment", "Comentario"),
+        ],
+        "jpeg": [
+            ("title", "Descripcion / Title"),
+            ("creator", "Artist / Creador"),
+            ("author", "Autor"),
+            ("copyright", "Copyright"),
+            ("license", "Licencia"),
+            ("comment", "Comentario EXIF"),
+        ],
+        "audio": [
+            ("title", "Titulo"),
+            ("creator", "Artista"),
+            ("author", "Artista (alt)"),
+            ("subject", "Album"),
+            ("copyright", "Copyright"),
+            ("license", "Licencia"),
+            ("comment", "Comentario"),
+        ],
+    }
+    TYPE_META = {
+        "pdf": ("PDF", "picture_as_pdf", "#e57373"),
+        "jpeg": ("JPEG", "image", "#64b5f6"),
+        "audio": ("Audio", "audio_file", "#81c784"),
+    }
+
+    with page_frame("Metadatos", active_path="/tools"):
+        selection_banner(tool="metadata")
+        section_title(
+            "Metadatos de archivos",
+            "Cada tipo tiene su panel. Al elegir archivos se leen los valores actuales; "
+            "cambia solo lo que quieras y simula antes de aplicar.",
+        )
+
+        # ---- Seleccion ----
+        with ui.row().classes("gap-2 flex-wrap items-center"):
+            async def _browse_files() -> None:
+                try:
+                    start_dir = str(get_workspace())
+                except Exception:
+                    start_dir = None
+                chosen = await pick_files_dialog(start_dir)
+                if not chosen:
+                    ui.notify(
+                        "No se abrio el dialogo o no hubo seleccion.",
+                        type="warning",
+                    )
+                    return
+                merged = list(
+                    dict.fromkeys(state["paths"] + [str(Path(c)) for c in chosen])
+                )
+                state["paths"] = merged
+                session_store.update_page_state("/tools/metadata", paths=merged)
+                await _reload_all()
+
+            ui.button(
+                "Elegir archivos…",
+                icon="folder_open",
+                on_click=_browse_files,
+            ).props("unelevated color=primary")
+
+            def _from_selection() -> None:
+                paths = []
+                try:
+                    bag = session_store.get_selection()
+                    raw = getattr(bag, "paths", None) or (
+                        bag.get("paths") if isinstance(bag, dict) else []
+                    )
+                    paths = [str(p) for p in (raw or [])]
+                except Exception:
+                    paths = []
+                if not paths:
+                    ui.notify("No hay seleccion desde Buscar", type="warning")
+                    return
+                state["paths"] = list(dict.fromkeys(state["paths"] + paths))
+                session_store.update_page_state(
+                    "/tools/metadata", paths=state["paths"]
+                )
+                ui.timer(0.05, lambda: _reload_all_sync(), once=True)
+
+            ui.button(
+                "Usar seleccion de Buscar",
+                icon="playlist_add",
+                on_click=_from_selection,
+            ).props("outline")
+
+            def _clear() -> None:
+                state["paths"] = []
+                state["snaps"] = {}
+                session_store.update_page_state("/tools/metadata", paths=[])
+
+                def _after_clear() -> None:
+                    try:
+                        _rebuild_panels()
+                    except Exception:
+                        pass
+                    try:
+                        ui.notify("Paneles eliminados", type="info", position="top")
+                    except Exception:
+                        pass
+
+                ui.timer(0.05, _after_clear, once=True)
+
+            ui.button(
+                "Quitar todos los paneles",
+                icon="clear_all",
+                on_click=_clear,
+            ).props("outline dense color=negative")
+
+        do_backup = ui.checkbox(
+            "Backup (.filesage_meta.bak) al escribir",
+            value=bool(saved.get("backup", True)),
+        )
+        job = JobControls(page_route="/tools/metadata")
+        panels_host = ui.column().classes("w-full gap-3")
+
+        # Referencias a inputs: kind -> path_str -> field -> input widget
+        editors: dict = {}
+
+        def _paths() -> list[Path]:
+            return [Path(p).expanduser() for p in state["paths"] if str(p).strip()]
+
+        def _load_snaps(paths: list[Path]) -> None:
+            state["snaps"] = {}
+            for p in paths:
+                if not p.is_file():
+                    continue
+                snap = engine.read_file_metadata(p)
+                state["snaps"][str(p)] = {
+                    "path": str(p),
+                    "kind": snap.kind,
+                    "error": snap.error,
+                    "fields": dict(snap.fields or {}),
+                }
+
+        def _remove_paths(to_remove: list[str]) -> None:
+            """Quita archivos y reconstruye fuera del slot del boton (evita RuntimeError NiceGUI)."""
+            drop = set(to_remove)
+            n = len(drop)
+            state["paths"] = [p for p in state["paths"] if p not in drop]
+            for p in drop:
+                state["snaps"].pop(p, None)
+            session_store.update_page_state("/tools/metadata", paths=state["paths"])
+
+            # El boton vive dentro del panel que se borra: diferir clear/notify
+            def _after_remove() -> None:
+                try:
+                    _rebuild_panels()
+                except Exception:
+                    pass
+                try:
+                    ui.notify(
+                        f"Eliminado de la lista: {n}",
+                        type="info",
+                        position="top",
+                    )
+                except Exception:
+                    pass
+
+            ui.timer(0.05, _after_remove, once=True)
+
+        def _rebuild_panels() -> None:
+            editors.clear()
+            panels_host.clear()
+            paths = [p for p in _paths() if p.is_file()]
+            by_kind: dict[str, list[Path]] = {"pdf": [], "jpeg": [], "audio": []}
+            unsupported: list[Path] = []
+            for p in paths:
+                k = detect_kind(p)
+                if k in by_kind:
+                    by_kind[k].append(p)
+                else:
+                    unsupported.append(p)
+
+            with panels_host:
+                if not paths:
+                    empty_state(
+                        "Sin archivos",
+                        "Pulsa «Elegir archivos…» o trae la seleccion de Buscar. "
+                        "Se leeran los metadatos al cargar.",
+                        icon="description",
+                    )
+                    return
+
+                if unsupported:
+                    with ui.card().classes("fs-card w-full p-3"):
+                        ui.label(
+                            f"Omitidos ({len(unsupported)}) — formato no editable aqui"
+                        ).classes("text-sm text-warning")
+                        for p in unsupported[:8]:
+                            ui.label(p.name).classes("text-xs text-[#6b6b80]")
+
+                for kind, items in by_kind.items():
+                    label, icon, color = TYPE_META[kind]
+                    fields_spec = TYPE_FIELDS[kind]
+                    with ui.card().classes("fs-card w-full p-4 gap-2"):
+                        with ui.row().classes("items-center gap-2 w-full"):
+                            ui.icon(icon).style(f"color:{color}")
+                            ui.label(f"{label}").classes("text-lg font-semibold")
+                            ui.badge(str(len(items))).props("color=primary")
+                            ui.space()
+                            ui.label(
+                                "Valores actuales · edita solo lo necesario"
+                            ).classes("text-xs text-[#6b6b80]")
+
+                            def _drop_kind(kind_paths=None):
+                                # kind_paths bound below
+                                pass
+
+                            ui.button(
+                                "Quitar panel",
+                                icon="delete_outline",
+                                on_click=lambda it=list(items): _remove_paths(
+                                    [str(x) for x in it]
+                                ),
+                            ).props("flat dense color=negative")
+
+                        if not items:
+                            ui.label("Ningun archivo de este tipo.").classes(
+                                "text-sm text-[#6b6b80]"
+                            )
+                            continue
+
+                        editors.setdefault(kind, {})
+                        for p in items:
+                            key = str(p)
+                            snap = state["snaps"].get(key) or {}
+                            cur = snap.get("fields") or {}
+                            err = snap.get("error")
+                            editors[kind].setdefault(key, {})
+
+                            with ui.expansion(
+                                p.name,
+                                icon=icon,
+                                value=len(items) == 1,
+                            ).classes("w-full"):
+                                with ui.row().classes(
+                                    "w-full items-center gap-2 mb-1"
+                                ):
+                                    ui.label(key).classes(
+                                        "text-xs text-[#6b6b80] break-all flex-grow"
+                                    )
+                                    ui.button(
+                                        "Quitar archivo",
+                                        icon="close",
+                                        on_click=lambda k=key: _remove_paths([k]),
+                                    ).props("flat dense round color=negative")
+                                if err:
+                                    ui.label(f"Error al leer: {err}").classes(
+                                        "text-negative text-sm"
+                                    )
+                                elif not any(cur.values()):
+                                    ui.label(
+                                        "Sin metadatos previos (campos vacios)."
+                                    ).classes("text-xs text-[#6b6b80]")
+
+                                with ui.grid(columns=2).classes(
+                                    "w-full gap-2 max-w-3xl"
+                                ):
+                                    for field_id, field_label in fields_spec:
+                                        current_val = cur.get(field_id) or ""
+                                        with ui.column().classes("gap-0"):
+                                            ui.label(field_label).classes(
+                                                "text-xs text-[#9898b0]"
+                                            )
+                                            if current_val:
+                                                ui.label(
+                                                    f"Actual: {current_val[:120]}"
+                                                ).classes(
+                                                    "text-xs text-[#6b6b80] truncate"
+                                                )
+                                            inp = ui.input(
+                                                value=current_val
+                                            ).classes("w-full").props(
+                                                "outlined dense "
+                                                "placeholder=\"(sin cambio si lo dejas igual)\""
+                                            )
+                                            editors[kind][key][field_id] = {
+                                                "input": inp,
+                                                "original": current_val,
+                                            }
+
+                                def _revert_file(k=key, kd=kind):
+                                    fmap = editors.get(kd, {}).get(k, {})
+                                    for _fid, meta in fmap.items():
+                                        orig = meta.get("original") or ""
+                                        try:
+                                            meta["input"].set_value(orig)
+                                        except Exception:
+                                            meta["input"].value = orig
+                                    ui.notify("Valores restaurados", type="info")
+
+                                ui.button(
+                                    "Restaurar valores de este archivo",
+                                    icon="undo",
+                                    on_click=_revert_file,
+                                ).props("flat dense")
+
+                        with ui.row().classes("gap-2 mt-2 flex-wrap"):
+                            def _make_handlers(k=kind, file_items=items):
+                                async def run_kind(dry: bool) -> None:
+                                    updates_per_file: list[tuple[Path, dict]] = []
+                                    for fp in file_items:
+                                        fk = str(fp)
+                                        fields_map = editors.get(k, {}).get(fk, {})
+                                        upd = {}
+                                        for fid, meta in fields_map.items():
+                                            new_v = (meta["input"].value or "").strip()
+                                            orig = (meta.get("original") or "").strip()
+                                            # Solo enviar si el usuario cambio el valor
+                                            if new_v != orig:
+                                                upd[fid] = new_v
+                                        if upd:
+                                            updates_per_file.append((fp, upd))
+                                    if not updates_per_file:
+                                        ui.notify(
+                                            f"No hay cambios en {k.upper()}",
+                                            type="info",
+                                        )
+                                        return
+
+                                    def work(reporter):
+                                        results = []
+                                        total = max(1, len(updates_per_file))
+                                        for i, (fp, upd) in enumerate(updates_per_file):
+                                            reporter.report(
+                                                f"{k}: {fp.name}",
+                                                i / total,
+                                            )
+                                            reporter.check()
+                                            from filesage.services.metadata_editor import (
+                                                apply_metadata,
+                                            )
+
+                                            results.append(
+                                                apply_metadata(
+                                                    fp,
+                                                    upd,
+                                                    dry_run=dry,
+                                                    backup=bool(do_backup.value),
+                                                )
+                                            )
+                                        reporter.report("Listo", 1.0)
+                                        return results
+
+                                    res = await job.run(
+                                        work,
+                                        start_msg=(
+                                            f"Simulando {k.upper()}…"
+                                            if dry
+                                            else f"Escribiendo {k.upper()}…"
+                                        ),
+                                    )
+                                    if res is None:
+                                        return
+                                    ok = sum(1 for r in res if r.success)
+                                    ui.notify(
+                                        f"{k.upper()}: {ok}/{len(res)} OK",
+                                        type="positive"
+                                        if ok == len(res)
+                                        else "warning",
+                                    )
+                                    if not dry:
+                                        _load_snaps([p for p, _ in updates_per_file])
+                                        _rebuild_panels()
+
+                                return run_kind
+
+                            handlers = _make_handlers()
+                            ui.button(
+                                f"Simular solo {label}",
+                                icon="science",
+                                on_click=lambda h=handlers: h(True),
+                            ).props("outline dense color=primary")
+                            ui.button(
+                                f"Aplicar solo {label}",
+                                icon="save",
+                                on_click=lambda h=handlers: h(False),
+                            ).props("unelevated dense color=primary")
+
+                # Accion global
+                with ui.row().classes("gap-2 flex-wrap mt-1"):
+                    async def run_all(dry: bool) -> None:
+                        all_jobs: list[tuple[Path, dict]] = []
+                        for kind, fmap in editors.items():
+                            for fpath, fields_map in fmap.items():
+                                upd = {}
+                                for fid, meta in fields_map.items():
+                                    new_v = (meta["input"].value or "").strip()
+                                    orig = (meta.get("original") or "").strip()
+                                    if new_v != orig:
+                                        upd[fid] = new_v
+                                if upd:
+                                    all_jobs.append((Path(fpath), upd))
+                        if not all_jobs:
+                            ui.notify("No hay cambios en ningun panel", type="info")
+                            return
+
+                        def work(reporter):
+                            from filesage.services.metadata_editor import apply_metadata
+
+                            results = []
+                            total = max(1, len(all_jobs))
+                            for i, (fp, upd) in enumerate(all_jobs):
+                                reporter.report(fp.name, i / total)
+                                reporter.check()
+                                results.append(
+                                    apply_metadata(
+                                        fp,
+                                        upd,
+                                        dry_run=dry,
+                                        backup=bool(do_backup.value),
+                                    )
+                                )
+                            reporter.report("Listo", 1.0)
+                            return results
+
+                        res = await job.run(
+                            work,
+                            start_msg="Simulando todo…" if dry else "Aplicando todo…",
+                        )
+                        if res is None:
+                            return
+                        ok = sum(1 for r in res if r.success)
+                        ui.notify(
+                            f"Global: {ok}/{len(res)} OK",
+                            type="positive" if ok == len(res) else "warning",
+                        )
+                        if not dry:
+                            _load_snaps(_paths())
+                            _rebuild_panels()
+
+                    ui.button(
+                        "Simular todos los tipos",
+                        icon="science",
+                        on_click=lambda: run_all(True),
+                    ).props("outline")
+                    ui.button(
+                        "Aplicar todos los tipos",
+                        icon="save",
+                        on_click=lambda: run_all(False),
+                    ).props("color=primary unelevated")
+
+        def _reload_all_sync() -> None:
+            paths = [p for p in _paths() if p.is_file()]
+            if not paths:
+                _rebuild_panels()
+                return
+            _load_snaps(paths)
+            _rebuild_panels()
+            ui.notify(f"Metadatos leidos: {len(paths)} archivo(s)", type="positive")
+
+        async def _reload_all() -> None:
+            def work(reporter):
+                paths = [p for p in _paths() if p.is_file()]
+                total = max(1, len(paths))
+                out = {}
+                for i, p in enumerate(paths):
+                    reporter.report(f"Leyendo {p.name}", i / total)
+                    reporter.check()
+                    snap = engine.read_file_metadata(p)
+                    out[str(p)] = {
+                        "path": str(p),
+                        "kind": snap.kind,
+                        "error": snap.error,
+                        "fields": dict(snap.fields or {}),
+                    }
+                reporter.report("Listo", 1.0)
+                return out
+
+            result = await job.run(work, start_msg="Leyendo metadatos…")
+            if result is None:
+                return
+            state["snaps"] = result
+            _rebuild_panels()
+
+        # Carga inicial si habia paths en sesion
+        if state["paths"]:
+            ui.timer(0.1, _reload_all_sync, once=True)
+        else:
+            _rebuild_panels()
+
+
+
 @ui.page("/tools/disk")
 def page_disk_diag() -> None:
     """Diagnostico rapido de discos y unidades extraibles."""
@@ -2763,8 +3278,9 @@ def page_disk_diag() -> None:
     with page_frame("Diagnostico de disco", active_path="/tools"):
         section_title(
             "Diagnostico de disco / USB",
-            "Prueba rapida de acceso, espacio y lectura. No repara el disco; "
-            "sirve para saber si conviene copiar mucho o si hay daños.",
+            "Prueba de lectura + señales de Windows (salud del volumen, PhysicalDisk, "
+            "SMART si existe y eventos disk/NTFS). Si tambien fallas copiando a mano, "
+            "el problema es del sistema o del hardware, no solo de FileSage.",
         )
         folder = folder_field(
             label="Unidad o carpeta a comprobar",

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "filesage"
-version = "0.9.13"
+version = "0.9.21"
 description = "Herramienta inteligente y modular para buscar, analizar, mover y eliminar archivos de forma segura (duplicados, espacio en disco, etc.)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -38,6 +38,8 @@ dependencies = [
     "pypdf>=4.0",
     "tinytag>=1.10",
     "puremagic>=1.26",
+    "piexif>=1.1.3",
+    "mutagen>=1.47",
     "qtawesome>=1.3",
 ]
 

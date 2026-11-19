@@ -11,6 +11,32 @@ from filesage.infrastructure.storage import new_action_id
 
 logger = logging.getLogger(__name__)
 
+SYSTEM_SKIP_NAMES = frozenset(
+    {
+        'system volume information',
+        '$recycle.bin',
+        'recycle.bin',
+        'recycler',
+        'pagefile.sys',
+        'hiberfil.sys',
+        'swapfile.sys',
+        'found.000',
+        'found.001',
+        'windows',
+        'program files',
+        'program files (x86)',
+        'programdata',
+    }
+)
+
+def _is_system_entry(path: Path) -> bool:
+    name = path.name.lower().strip()
+    if name in SYSTEM_SKIP_NAMES:
+        return True
+    if name.startswith('$') and name not in {'.'}:
+        return True
+    return False
+
 
 def _norm_src(path: Path) -> Path:
     """Normaliza rutas Windows tipo 'F:' -> 'F:\\'."""
@@ -63,11 +89,17 @@ def expand_sources(
                 logger.info("Carpeta vacia: %s", src)
                 continue
             for child in children:
+                if _is_system_entry(child):
+                    logger.info("Omitido sistema: %s", child)
+                    continue
                 key = str(child)
                 if key not in seen:
                     seen.add(key)
                     out.append(child)
         else:
+            if _is_system_entry(src):
+                logger.info("Omitido sistema: %s", src)
+                continue
             key = str(src)
             if key not in seen:
                 seen.add(key)

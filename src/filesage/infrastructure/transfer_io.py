@@ -18,8 +18,14 @@ logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[[str, float], None]
 CHUNK = 1024 * 1024  # 1 MiB
-DEFAULT_FILE_TIMEOUT_S = 90.0
-DEFAULT_STALL_S = 20.0  # sin bytes nuevos → omitir archivo
+DEFAULT_FILE_TIMEOUT_S = 45.0
+DEFAULT_STALL_S = 12.0  # sin bytes nuevos → omitir archivo
+
+def adaptive_timeout_s(size_bytes: int, base: float = DEFAULT_FILE_TIMEOUT_S) -> float:
+    """Archivos pequeños no merecen esperar 90s en un USB muerto."""
+    mb = max(0.1, size_bytes / (1024 * 1024))
+    # ~8 s por MB, mínimo 12s, máximo base
+    return float(min(base, max(12.0, mb * 8.0)))
 
 
 @dataclass
@@ -74,6 +80,10 @@ def _copy_file_chunked(
         size = src.stat().st_size
     except OSError as exc:
         raise OSError(f"stat: {exc}") from exc
+
+    # Timeout adaptativo: un MP3 de 4 MB no espera 90s
+    if timeout_s >= DEFAULT_FILE_TIMEOUT_S - 0.1:
+        timeout_s = adaptive_timeout_s(size, base=timeout_s)
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_name(dst.name + ".filesage_partial")

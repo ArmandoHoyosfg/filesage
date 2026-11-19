@@ -143,6 +143,32 @@ class Engine:
                 )
         return plans
 
+    def read_file_metadata(self, path: Path):
+        """Lee metadatos soportados (PDF/JPEG)."""
+        from filesage.services.metadata_editor import read_metadata
+
+        return read_metadata(Path(path))
+
+    def apply_file_metadata(
+        self,
+        paths: list,
+        updates: dict,
+        *,
+        dry_run: bool = True,
+        backup: bool = True,
+        progress=None,
+    ):
+        """Escribe metadatos (dry-run por defecto, backup opcional)."""
+        from filesage.services.metadata_editor import batch_apply
+
+        return batch_apply(
+            [Path(p) for p in paths],
+            dict(updates or {}),
+            dry_run=dry_run,
+            backup=backup,
+            progress=progress,
+        )
+
     def plan_transfer(
         self,
         sources: Sequence[Path] | list,
