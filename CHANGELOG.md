@@ -1,3 +1,9 @@
+## [0.9.22] - 2026-11-22
+
+### Fixed
+- Metadatos WinError 17: temporales en la misma unidad que el archivo (F: vs C:\\Temp)
+- Notificaciones NiceGUI tras rebuild de paneles (slot eliminado)
+
 ## [0.9.21] - 2026-11-19
 
 ### Fixed

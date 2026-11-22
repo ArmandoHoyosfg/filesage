@@ -3148,8 +3148,15 @@ def page_metadata() -> None:
                                         else "warning",
                                     )
                                     if not dry:
-                                        _load_snaps([p for p, _ in updates_per_file])
-                                        _rebuild_panels()
+                                        def _refresh():
+                                            try:
+                                                _load_snaps(
+                                                    [p for p, _ in updates_per_file]
+                                                )
+                                                _rebuild_panels()
+                                            except Exception:
+                                                pass
+                                        ui.timer(0.08, _refresh, once=True)
 
                                 return run_kind
 
@@ -3214,8 +3221,13 @@ def page_metadata() -> None:
                             type="positive" if ok == len(res) else "warning",
                         )
                         if not dry:
-                            _load_snaps(_paths())
-                            _rebuild_panels()
+                            def _refresh_all():
+                                try:
+                                    _load_snaps(_paths())
+                                    _rebuild_panels()
+                                except Exception:
+                                    pass
+                            ui.timer(0.08, _refresh_all, once=True)
 
                     ui.button(
                         "Simular todos los tipos",

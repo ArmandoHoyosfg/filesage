@@ -1,3 +1,3 @@
 """FileSage - herramienta modular y segura para gestion de archivos."""
 
-__version__ = "0.9.21"
+__version__ = "0.9.22"

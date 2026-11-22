@@ -8,6 +8,13 @@ from typing import Any
 
 from nicegui import ui
 
+
+def _safe_notify(message: str, *, type: str = "info") -> None:
+    try:
+        ui.notify(message, type=type, position="top")
+    except Exception:
+        pass
+
 from filesage.application.progress import CancellationToken, ProgressReporter
 from filesage.domain.exceptions import CancelledError
 from filesage.presentation.web import session_store
@@ -92,7 +99,7 @@ class JobControls:
             self.status.set_text("Listo — sin operacion en curso")
         session_store.job_finish(message or "Operacion terminada")
         if notify and message:
-            ui.notify(message, type="positive", position="top")
+            _safe_notify(message, type="positive")
 
     def cancel(self) -> None:
         if self.token is not None:
@@ -122,14 +129,14 @@ class JobControls:
             )
             self.finish(notice, notify=bool(success_notice))
             if success_notice is None:
-                ui.notify(notice, type="positive", position="top")
+                _safe_notify(notice, type="positive")
             return result
         except CancelledError:
             self.finish("Operacion cancelada", notify=False)
-            ui.notify("Cancelado", type="warning", position="top")
+            _safe_notify("Cancelado", type="warning")
             return None
         except Exception as e:
             # No relanzar: evita tumbar el servidor NiceGUI ("Connection lost")
             self.finish(f"Error: {e}", notify=False)
-            ui.notify(str(e)[:300], type="negative", position="top")
+            _safe_notify(str(e)[:300], type="negative")
             return None

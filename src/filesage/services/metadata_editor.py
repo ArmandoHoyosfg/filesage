@@ -303,12 +303,8 @@ def _write_audio(path: Path, updates: dict[str, str]) -> None:
     except ImportError as exc:
         raise ActionError("Para audio instala mutagen: pip install mutagen") from exc
 
-    fd, tmp_name = tempfile.mkstemp(suffix=path.suffix, prefix=".filesage_meta_")
-    tmp = Path(tmp_name)
+    tmp = _temp_on_same_volume(path, suffix=path.suffix or ".mp3")
     try:
-        import os
-
-        os.close(fd)
         shutil.copy2(path, tmp)
 
         audio = MutagenFile(str(tmp), easy=True)
@@ -462,10 +458,45 @@ def apply_metadata(
         )
 
 
+def _temp_on_same_volume(dest: Path, *, suffix: str) -> Path:
+    """Temp en el mismo directorio/volumen que dest (evita WinError 17 entre unidades)."""
+    import os
+
+    dest = Path(dest)
+    parent = dest.parent if dest.parent.exists() else Path(".")
+    fd, name = tempfile.mkstemp(
+        suffix=suffix, prefix=".filesage_meta_", dir=str(parent)
+    )
+    os.close(fd)
+    return Path(name)
+
+
 def _atomic_replace(src_tmp: Path, dest: Path) -> None:
+    """Reemplazo atomico; fallback si temp y destino estan en distintas unidades."""
+    dest = Path(dest)
+    src_tmp = Path(src_tmp)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # En Windows, replace funciona si dest existe
-    src_tmp.replace(dest)
+    try:
+        src_tmp.replace(dest)
+        return
+    except OSError as exc:
+        winerr = getattr(exc, "winerror", None)
+        if winerr != 17 and getattr(exc, "errno", None) not in (17, 18):
+            raise
+    # Cross-device: copiar a nombre intermedio en el destino y reemplazar
+    mid = dest.with_name(dest.name + ".filesage_replacing")
+    try:
+        if mid.exists():
+            mid.unlink()
+        shutil.copy2(src_tmp, mid)
+        mid.replace(dest)
+    finally:
+        for victim in (mid, src_tmp):
+            try:
+                if victim.exists():
+                    victim.unlink()
+            except OSError:
+                pass
 
 
 def _write_pdf(path: Path, updates: dict[str, str]) -> None:
@@ -495,20 +526,18 @@ def _write_pdf(path: Path, updates: dict[str, str]) -> None:
     if meta_map:
         writer.add_metadata(meta_map)
 
-    fd, tmp_name = tempfile.mkstemp(suffix=".pdf", prefix=".filesage_meta_")
-    tmp = Path(tmp_name)
+    tmp = _temp_on_same_volume(path, suffix=".pdf")
     try:
-        import os
-
-        os.close(fd)
         with open(tmp, "wb") as f:
             writer.write(f)
-        # Verificar
         PdfReader(str(tmp))
         _atomic_replace(tmp, path)
     except Exception:
         if tmp.exists():
-            tmp.unlink(missing_ok=True)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
         raise
 
 
@@ -550,15 +579,9 @@ def _write_jpeg(path: Path, updates: dict[str, str]) -> None:
     zeroth[piexif.ImageIFD.Software] = _enc("FileSage")
 
     exif_bytes = piexif.dump(exif_dict)
-    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix=".filesage_meta_")
-    tmp = Path(tmp_name)
+    tmp = _temp_on_same_volume(path, suffix=path.suffix or ".jpg")
     try:
-        import os
-
-        os.close(fd)
-        # Insert EXIF without re-encoding pixels
         piexif.insert(exif_bytes, str(path), str(tmp))
-        # Verificar
         piexif.load(str(tmp))
         _atomic_replace(tmp, path)
     except Exception:
